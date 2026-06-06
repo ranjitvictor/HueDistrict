@@ -3,6 +3,7 @@ const session = require('express-session');
 const passport = require('passport');
 const { Strategy: GoogleStrategy } = require('passport-google-oauth20');
 const { google } = require('googleapis');
+const Anthropic = require('@anthropic-ai/sdk');
 
 const ROOT_FOLDER_ID = '1018xTizZybeAjs-9wlgWzJWx7mSL0k5t';
 const REVIEW_FOLDER_NAME = 'Posters for Review';
@@ -70,6 +71,7 @@ function getDriveClient(user) {
 }
 
 const folderCache = {};
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 async function findFolder(drive, parentId, name) {
   const key = `${parentId}:${name}`;
@@ -118,6 +120,8 @@ function groupPosters(files) {
       base = name.replace(/_ig\.(png|jpg|jpeg)$/i, ''); type = 'ig';
     } else if (/_web\.(png|jpg|jpeg)$/i.test(name)) {
       base = name.replace(/_web\.(png|jpg|jpeg)$/i, ''); type = 'web';
+    } else if (/_meta\.json$/i.test(name)) {
+      base = name.replace(/_meta\.json$/i, ''); type = 'meta';
     } else if (/\.pdf$/i.test(name)) {
       base = name.replace(/\.pdf$/i, ''); type = 'pdf';
     } else {
@@ -149,6 +153,40 @@ async function getOrCreateSubfolder(drive, parentId, name) {
     fields: 'id',
   });
   return created.data.id;
+}
+
+async function saveMetaToDrive(drive, folderId, baseName, meta) {
+  const fileName = `${baseName}_meta.json`;
+  const body = JSON.stringify(meta, null, 2);
+  const existing = await drive.files.list({
+    q: `'${folderId}' in parents and name = '${fileName.replace(/'/g, "\\'")}' and trashed = false`,
+    fields: 'files(id)',
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+  });
+  if (existing.data.files.length) {
+    await drive.files.update({
+      fileId: existing.data.files[0].id,
+      requestBody: {},
+      media: { mimeType: 'application/json', body },
+      supportsAllDrives: true,
+    });
+  } else {
+    await drive.files.create({
+      requestBody: { name: fileName, parents: [folderId], mimeType: 'application/json' },
+      media: { mimeType: 'application/json', body },
+      supportsAllDrives: true,
+      fields: 'id',
+    });
+  }
+}
+
+async function readMetaFromDrive(drive, fileId) {
+  const r = await drive.files.get(
+    { fileId, alt: 'media', supportsAllDrives: true },
+    { responseType: 'arraybuffer' }
+  );
+  return JSON.parse(Buffer.from(r.data).toString('utf8'));
 }
 
 function esc(str) {
@@ -197,6 +235,19 @@ const css = `
   .toast { position: fixed; bottom: 24px; right: 24px; background: #111; color: #fff; padding: 12px 20px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity 0.25s; pointer-events: none; z-index: 100; }
   .toast.show { opacity: 1; }
   .badge-missing { font-size: 11px; color: #9ca3af; text-align: center; }
+  .meta-section { border-top: 1px solid #f3f4f6; padding-top: 10px; display: flex; flex-direction: column; gap: 7px; }
+  .meta-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: #9ca3af; }
+  .meta-input { width: 100%; font-size: 13px; font-family: inherit; border: 1px solid #e5e7eb; border-radius: 6px; padding: 6px 8px; color: #111; background: #fafafa; resize: none; transition: border-color 0.15s; }
+  .meta-input:focus { outline: none; border-color: #6b7280; background: #fff; }
+  .meta-row { display: flex; gap: 6px; }
+  .btn-ghost { background: none; border: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; padding: 5px 10px; border-radius: 6px; cursor: pointer; flex: 1; }
+  .btn-ghost:hover { background: #f3f4f6; color: #111; }
+  .btn-save { background: #111; color: #fff; font-size: 12px; padding: 5px 10px; border-radius: 6px; border: none; cursor: pointer; flex: 1; }
+  .btn-save:hover { background: #374151; }
+  .meta-status { font-size: 11px; color: #9ca3af; text-align: right; min-height: 14px; }
+  .generating { color: #6b7280; font-size: 12px; display: flex; align-items: center; gap: 6px; padding: 8px 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner { width: 12px; height: 12px; border: 2px solid #e5e7eb; border-top-color: #6b7280; border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
   .poster-img { cursor: zoom-in; }
   .lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 200; align-items: center; justify-content: center; padding: 24px; }
   .lightbox.open { display: flex; }
@@ -362,6 +413,48 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
 
     const posters = groupPosters(files);
 
+    // Load existing meta content for posters that have it
+    const metaContent = {};
+    await Promise.all(posters.filter(p => p.meta).map(async p => {
+      try { metaContent[p.name.toLowerCase()] = await readMetaFromDrive(drive, p.meta.id); } catch {}
+    }));
+
+    function metaSection(p) {
+      const meta = metaContent[p.name.toLowerCase()];
+      const safeBase = esc(p.name);
+      const webId = p.web?.id || '';
+      const webMime = p.web?.mimeType || 'image/jpeg';
+      if (!p.web) return '';
+      if (meta) {
+        const tags = Array.isArray(meta.hashtags) ? meta.hashtags.join(' ') : (meta.hashtags || '');
+        const modLabel = meta.modifiedAt ? `Edited ${new Date(meta.modifiedAt).toLocaleDateString()}` : `Generated ${new Date(meta.generatedAt).toLocaleDateString()}`;
+        return `
+          <div class="meta-section">
+            <div class="meta-label">Instagram Caption</div>
+            <input class="meta-input" id="title-${safeBase}" value="${esc(meta.title || '')}" placeholder="Title">
+            <textarea class="meta-input" id="caption-${safeBase}" rows="3" placeholder="Caption">${esc(meta.caption || '')}</textarea>
+            <textarea class="meta-input" id="hashtags-${safeBase}" rows="2" placeholder="#hashtags">${esc(tags)}</textarea>
+            <div class="meta-row">
+              <button class="btn-save" onclick="saveMeta(this,'${esc(folderId)}','${safeBase}')">Save</button>
+              <button class="btn-ghost" onclick="generateMeta(this,'${esc(folderId)}','${safeBase}','${webId}','${esc(webMime)}','${esc(folderName)}')">↺ Regenerate</button>
+            </div>
+            <div class="meta-status" id="status-${safeBase}">${esc(modLabel)}</div>
+          </div>`;
+      }
+      return `
+        <div class="meta-section" id="metasec-${safeBase}">
+          <div class="generating"><div class="spinner"></div>Generating caption…</div>
+        </div>`;
+    }
+
+    const needsGeneration = posters
+      .filter(p => p.web && !p.meta)
+      .map(p => ({
+        baseName: p.name,
+        webFileId: p.web.id,
+        webMimeType: p.web.mimeType || 'image/jpeg',
+      }));
+
     const cards = posters.length
       ? posters.map(p => {
           const isListed = p.ig && listedNames.has(p.ig.name);
@@ -373,6 +466,7 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
                 : `<div class="poster-img"></div>`}
               <div class="poster-body">
                 <div class="poster-name" title="${esc(p.name)}">${esc(p.name)}</div>
+                ${metaSection(p)}
                 <div class="actions">
                   <div class="status-actions">
                     ${isListed
@@ -392,6 +486,70 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
       : '<div class="empty">No posters in this folder</div>';
 
     const script = `
+      const _folderId = '${esc(folderId)}';
+      const _folderName = '${esc(folderName)}';
+
+      async function generateMeta(btn, folderId, baseName, webFileId, webMimeType, folderName) {
+        const sec = btn ? btn.closest('.meta-section') : document.getElementById('metasec-' + baseName);
+        if (sec) sec.innerHTML = '<div class="generating"><div class="spinner"></div>Generating…</div>';
+        try {
+          const r = await fetch('/api/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folderId, baseName, webFileId, webMimeType, folderName }),
+          });
+          if (r.ok) {
+            const meta = await r.json();
+            const tags = meta.hashtags.join(' ');
+            if (sec) sec.outerHTML = \`
+              <div class="meta-section">
+                <div class="meta-label">Instagram Caption</div>
+                <input class="meta-input" id="title-\${baseName}" value="\${meta.title}" placeholder="Title">
+                <textarea class="meta-input" id="caption-\${baseName}" rows="3" placeholder="Caption">\${meta.caption}</textarea>
+                <textarea class="meta-input" id="hashtags-\${baseName}" rows="2" placeholder="#hashtags">\${tags}</textarea>
+                <div class="meta-row">
+                  <button class="btn-save" onclick="saveMeta(this,'${esc(folderId)}','\${baseName}')">Save</button>
+                  <button class="btn-ghost" onclick="generateMeta(this,'${esc(folderId)}','\${baseName}','\${webFileId}','\${webMimeType}','${esc(folderName)}')">↺ Regenerate</button>
+                </div>
+                <div class="meta-status" id="status-\${baseName}">Generated just now</div>
+              </div>\`;
+            showToast('Caption generated ✓');
+          } else {
+            if (sec) sec.innerHTML = '<div class="badge-missing">Generation failed — <button class="btn-ghost" style="display:inline;padding:2px 8px" onclick="generateMeta(null,\\''+folderId+'\\',\\''+baseName+'\\',\\''+webFileId+'\\',\\''+webMimeType+'\\',\\''+folderName+'\\')">Retry</button></div>';
+            showToast('Error: ' + await r.text());
+          }
+        } catch {
+          showToast('Network error during generation');
+        }
+      }
+
+      async function saveMeta(btn, folderId, baseName) {
+        const title = document.getElementById('title-' + baseName)?.value || '';
+        const caption = document.getElementById('caption-' + baseName)?.value || '';
+        const hashtagsRaw = document.getElementById('hashtags-' + baseName)?.value || '';
+        const hashtags = hashtagsRaw.trim().split(/\\s+/).filter(Boolean);
+        btn.textContent = 'Saving…';
+        try {
+          const r = await fetch('/api/save-meta', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folderId, baseName, title, caption, hashtags }),
+          });
+          if (r.ok) {
+            btn.textContent = 'Save';
+            const status = document.getElementById('status-' + baseName);
+            if (status) status.textContent = 'Saved just now';
+            showToast('Saved ✓');
+          } else {
+            btn.textContent = 'Save';
+            showToast('Save failed: ' + await r.text());
+          }
+        } catch {
+          btn.textContent = 'Save';
+          showToast('Network error');
+        }
+      }
+
       async function approve(btn, folderName, igId, webId, igName, webName) {
         btn.disabled = true;
         btn.textContent = 'Processing…';
@@ -442,7 +600,13 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
           btn.textContent = 'Unlist';
           showToast('Network error — try again');
         }
-      }`;
+      }
+
+      // Auto-generate for new posters on page load
+      const needsGen = ${JSON.stringify(needsGeneration)};
+      needsGen.forEach(p => {
+        generateMeta(null, _folderId, p.baseName, p.webFileId, p.webMimeType, _folderName);
+      });`;
 
     res.send(layout(folderName, req.user, `
       <div class="page-hdr">
@@ -502,6 +666,74 @@ app.post('/api/approve', requireAuth, async (req, res) => {
       drive.files.copy({ fileId: igId, requestBody: { parents: [destId] }, supportsAllDrives: true }),
       drive.files.copy({ fileId: webId, requestBody: { parents: [destId] }, supportsAllDrives: true }),
     ]);
+
+    res.sendStatus(200);
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
+// Auto-generate Instagram metadata using Claude vision
+app.post('/api/generate', requireAuth, async (req, res) => {
+  try {
+    const { folderId, baseName, webFileId, webMimeType, folderName } = req.body;
+    if (!folderId || !baseName || !webFileId) return res.status(400).send('Missing fields');
+
+    const drive = getDriveClient(req.user);
+
+    const imgRes = await drive.files.get(
+      { fileId: webFileId, alt: 'media', supportsAllDrives: true },
+      { responseType: 'arraybuffer' }
+    );
+    const imageData = Buffer.from(imgRes.data).toString('base64');
+    const mediaType = (webMimeType || 'image/jpeg').includes('png') ? 'image/png' : 'image/jpeg';
+
+    const dateMatch = folderName.match(/\d{1,2}[-\s]\w+[-\s]\d{4}/);
+    const dropDate = dateMatch ? dateMatch[0] : 'an upcoming drop';
+
+    const message = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1024,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mediaType, data: imageData } },
+          { type: 'text', text: `You are an Instagram content creator for HueDistrict, a bold art poster brand from Bengaluru, India. HueDistrict creates "Posters with a pulse" — vivid, collector-grade art prints sold in limited drops. Brand voice: confident, artsy, slightly edgy. Never corporate or generic. Audience: young urban Indians who care about art, design, and culture.
+
+Drop theme: "${folderName}"
+Poster name: "${baseName}"
+Drop date: ${dropDate}
+
+Analyse the poster and generate:
+1. Title: punchy, evocative, max 8 words, no hashtags
+2. Caption: 2–3 sentences. Evoke the mood of the image, then a soft CTA referencing the drop date. Don't mention price.
+3. Hashtags: 12–15. Mix niche art/print tags, Indian art community tags, and broad reach tags. Always include #huedistrict and #posterart.
+
+Reply ONLY with valid JSON, no markdown:
+{"title":"...","caption":"...","hashtags":["..."]}` },
+        ],
+      }],
+    });
+
+    const generated = JSON.parse(message.content[0].text.trim());
+    const meta = { ...generated, generatedAt: new Date().toISOString(), modifiedAt: null };
+    await saveMetaToDrive(drive, folderId, baseName, meta);
+
+    res.json(meta);
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
+// Save edited metadata
+app.post('/api/save-meta', requireAuth, async (req, res) => {
+  try {
+    const { folderId, baseName, title, caption, hashtags } = req.body;
+    if (!folderId || !baseName) return res.status(400).send('Missing fields');
+
+    const drive = getDriveClient(req.user);
+    const meta = { title, caption, hashtags, modifiedAt: new Date().toISOString() };
+    await saveMetaToDrive(drive, folderId, baseName, meta);
 
     res.sendStatus(200);
   } catch (err) {
