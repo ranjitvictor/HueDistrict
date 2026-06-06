@@ -191,6 +191,8 @@ const css = `
   .btn-listed { background: #dcfce7; color: #15803d; cursor: default; font-size: 12px; pointer-events: none; }
   .btn-gray { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
   .btn-gray:hover { background: #e5e7eb; }
+  .btn-red { background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; }
+  .btn-red:hover:not(:disabled) { background: #fecaca; }
   .empty { color: #9ca3af; font-size: 15px; padding: 64px 0; text-align: center; grid-column: 1/-1; }
   .toast { position: fixed; bottom: 24px; right: 24px; background: #111; color: #fff; padding: 12px 20px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity 0.25s; pointer-events: none; z-index: 100; }
   .toast.show { opacity: 1; }
@@ -372,11 +374,14 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
               <div class="poster-body">
                 <div class="poster-name" title="${esc(p.name)}">${esc(p.name)}</div>
                 <div class="actions">
-                  ${isListed
-                    ? `<div class="btn btn-listed">✓ Listed for Sale</div>`
-                    : canApprove
-                      ? `<button class="btn btn-green" onclick="approve(this,'${esc(folderName)}','${p.ig.id}','${p.web.id}')">Ready for Sale</button>`
-                      : `<div class="badge-missing">Missing _ig or _web version</div>`}
+                  <div class="status-actions">
+                    ${isListed
+                      ? `<div class="btn btn-listed">✓ Listed for Sale</div>
+                         <button class="btn btn-red" onclick="unlist(this,'${esc(folderName)}','${esc(p.ig?.name||'')}','${esc(p.web?.name||'')}','${p.ig?.id||''}','${p.web?.id||''}')">Unlist</button>`
+                      : canApprove
+                        ? `<button class="btn btn-green" onclick="approve(this,'${esc(folderName)}','${p.ig.id}','${p.web.id}','${esc(p.ig.name)}','${esc(p.web.name)}')">Ready for Sale</button>`
+                        : `<div class="badge-missing">Missing _ig or _web version</div>`}
+                  </div>
                   ${p.pdf
                     ? `<a href="/api/download/${esc(p.pdf.id)}" class="btn btn-gray">Download PDF</a>`
                     : ''}
@@ -387,7 +392,7 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
       : '<div class="empty">No posters in this folder</div>';
 
     const script = `
-      async function approve(btn, folderName, igId, webId) {
+      async function approve(btn, folderName, igId, webId, igName, webName) {
         btn.disabled = true;
         btn.textContent = 'Processing…';
         try {
@@ -397,9 +402,9 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
             body: JSON.stringify({ folderName, igId, webId }),
           });
           if (r.ok) {
-            btn.className = 'btn btn-listed';
-            btn.textContent = '✓ Listed for Sale';
-            btn.onclick = null;
+            btn.closest('.status-actions').innerHTML =
+              '<div class="btn btn-listed">✓ Listed for Sale</div>' +
+              '<button class="btn btn-red" onclick="unlist(this,\\'' + folderName + '\\',\\'' + igName + '\\',\\'' + webName + '\\',\\'' + igId + '\\',\\'' + webId + '\\')">Unlist</button>';
             showToast('Added to Posters for Sale ✓');
           } else {
             btn.disabled = false;
@@ -409,6 +414,32 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
         } catch {
           btn.disabled = false;
           btn.textContent = 'Ready for Sale';
+          showToast('Network error — try again');
+        }
+      }
+
+      async function unlist(btn, folderName, igName, webName, igId, webId) {
+        if (!confirm('Remove this poster from sale? The copies in Posters for Sale will be deleted.')) return;
+        btn.disabled = true;
+        btn.textContent = 'Removing…';
+        try {
+          const r = await fetch('/api/unlist', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folderName, igName, webName }),
+          });
+          if (r.ok) {
+            btn.closest('.status-actions').innerHTML =
+              '<button class="btn btn-green" onclick="approve(this,\\'' + folderName + '\\',\\'' + igId + '\\',\\'' + webId + '\\',\\'' + igName + '\\',\\'' + webName + '\\')">Ready for Sale</button>';
+            showToast('Removed from Posters for Sale');
+          } else {
+            btn.disabled = false;
+            btn.textContent = 'Unlist';
+            showToast('Error: ' + await r.text());
+          }
+        } catch {
+          btn.disabled = false;
+          btn.textContent = 'Unlist';
           showToast('Network error — try again');
         }
       }`;
@@ -471,6 +502,41 @@ app.post('/api/approve', requireAuth, async (req, res) => {
       drive.files.copy({ fileId: igId, requestBody: { parents: [destId] }, supportsAllDrives: true }),
       drive.files.copy({ fileId: webId, requestBody: { parents: [destId] }, supportsAllDrives: true }),
     ]);
+
+    res.sendStatus(200);
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
+// Delete _ig + _web copies from Posters for Sale
+app.post('/api/unlist', requireAuth, async (req, res) => {
+  try {
+    const { folderName, igName, webName } = req.body;
+    if (!folderName || !igName || !webName) return res.status(400).send('Missing fields');
+
+    const drive = getDriveClient(req.user);
+    const saleFolderId = await findFolder(drive, ROOT_FOLDER_ID, SALE_FOLDER_NAME);
+
+    const subRes = await drive.files.list({
+      q: `'${saleFolderId}' in parents and name = '${folderName.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+      fields: 'files(id)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+    if (!subRes.data.files.length) return res.status(404).send('Sale subfolder not found');
+
+    const saleSubId = subRes.data.files[0].id;
+    const filesRes = await drive.files.list({
+      q: `'${saleSubId}' in parents and (name = '${igName}' or name = '${webName}') and trashed = false`,
+      fields: 'files(id)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+
+    await Promise.all(filesRes.data.files.map(f =>
+      drive.files.delete({ fileId: f.id, supportsAllDrives: true })
+    ));
 
     res.sendStatus(200);
   } catch (err) {
