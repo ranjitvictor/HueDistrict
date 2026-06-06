@@ -195,6 +195,13 @@ const css = `
   .toast { position: fixed; bottom: 24px; right: 24px; background: #111; color: #fff; padding: 12px 20px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity 0.25s; pointer-events: none; z-index: 100; }
   .toast.show { opacity: 1; }
   .badge-missing { font-size: 11px; color: #9ca3af; text-align: center; }
+  .poster-img { cursor: zoom-in; }
+  .lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 200; align-items: center; justify-content: center; padding: 24px; }
+  .lightbox.open { display: flex; }
+  .lightbox-inner { position: relative; max-width: 90vw; max-height: 90vh; }
+  .lightbox-img { max-width: 90vw; max-height: 90vh; object-fit: contain; border-radius: 4px; display: block; }
+  .lightbox-close { position: absolute; top: -14px; right: -14px; width: 32px; height: 32px; background: #fff; border: none; border-radius: 50%; cursor: pointer; font-size: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
+  .lightbox-name { color: #fff; font-size: 13px; text-align: center; margin-top: 12px; opacity: 0.7; }
 `;
 
 const toastScript = `
@@ -204,6 +211,16 @@ const toastScript = `
     t.classList.add('show');
     setTimeout(() => t.classList.remove('show'), ms);
   }
+  function openLightbox(src, name) {
+    const lb = document.getElementById('lightbox');
+    document.getElementById('lightbox-img').src = src;
+    document.getElementById('lightbox-name').textContent = name;
+    lb.classList.add('open');
+  }
+  function closeLightbox() {
+    document.getElementById('lightbox').classList.remove('open');
+  }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
 `;
 
 function layout(title, user, body, extraScript = '') {
@@ -225,6 +242,13 @@ function layout(title, user, body, extraScript = '') {
   </header>
   <main>${body}</main>
   <div class="toast" id="toast"></div>
+  <div class="lightbox" id="lightbox" onclick="if(event.target===this)closeLightbox()">
+    <div class="lightbox-inner">
+      <button class="lightbox-close" onclick="closeLightbox()">×</button>
+      <img class="lightbox-img" id="lightbox-img" src="" alt="">
+      <div class="lightbox-name" id="lightbox-name"></div>
+    </div>
+  </div>
   <script>${toastScript}${extraScript}</script>
 </body>
 </html>`;
@@ -343,7 +367,7 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
           return `
             <div class="poster-card">
               ${p.web
-                ? `<img class="poster-img" src="/api/preview/${esc(p.web.id)}" alt="${esc(p.name)}" loading="lazy">`
+                ? `<img class="poster-img" src="/api/preview/${esc(p.web.id)}" alt="${esc(p.name)}" loading="lazy" onclick="openLightbox(this.src,'${esc(p.name)}')">`
                 : `<div class="poster-img"></div>`}
               <div class="poster-body">
                 <div class="poster-name" title="${esc(p.name)}">${esc(p.name)}</div>
