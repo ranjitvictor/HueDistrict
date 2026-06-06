@@ -74,11 +74,29 @@ function getDriveClient(user) {
 const folderCache = {};
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-function getServiceDriveClient() {
-  if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY) return null;
+function parseServiceAccountKey() {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  if (!raw) return { error: 'missing' };
   try {
-    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
-    const auth = new google.auth.GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/drive'] });
+    const credentials = JSON.parse(raw);
+    // Railway sometimes turns real newlines in the private key into literal \n
+    if (credentials.private_key && credentials.private_key.includes('\\n')) {
+      credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
+    }
+    if (!credentials.client_email || !credentials.private_key) {
+      return { error: 'incomplete' };
+    }
+    return { credentials };
+  } catch (e) {
+    return { error: 'invalid-json', detail: e.message };
+  }
+}
+
+function getServiceDriveClient() {
+  const parsed = parseServiceAccountKey();
+  if (parsed.error) return null;
+  try {
+    const auth = new google.auth.GoogleAuth({ credentials: parsed.credentials, scopes: ['https://www.googleapis.com/auth/drive'] });
     return google.drive({ version: 'v3', auth });
   } catch (e) { return null; }
 }
@@ -1015,6 +1033,22 @@ app.post('/api/pricing/save', requireAuth, async (req, res) => {
 });
 
 // ── Public endpoints (customer-facing, CORS) ─────────────
+
+// Diagnostic — reports service-account health without leaking secrets
+app.get('/api/sa-health', requireAuth, async (req, res) => {
+  const parsed = parseServiceAccountKey();
+  if (parsed.error) return res.json({ ok: false, reason: parsed.error, detail: parsed.detail || null });
+  const out = { ok: true, clientEmail: parsed.credentials.client_email };
+  try {
+    const drive = getServiceDriveClient();
+    await drive.files.get({ fileId: ROOT_FOLDER_ID, fields: 'id,name', supportsAllDrives: true });
+    out.folderAccess = true;
+  } catch (e) {
+    out.folderAccess = false;
+    out.folderError = e.message;
+  }
+  res.json(out);
+});
 
 app.options('/api/public-config', (req, res) => { setCors(res); res.sendStatus(200); });
 app.get('/api/public-config', async (req, res) => {
