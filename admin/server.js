@@ -108,15 +108,29 @@ async function listFiles(drive, parentId) {
 
 function groupPosters(files) {
   const groups = {};
+  const keyMap = {}; // lowercase → canonical key
+
   for (const file of files) {
     const { name } = file;
     let base, type;
-    if (name.endsWith('_ig.png')) { base = name.slice(0, -7); type = 'ig'; }
-    else if (name.endsWith('_web.png')) { base = name.slice(0, -8); type = 'web'; }
-    else if (name.toLowerCase().endsWith('.pdf')) { base = name.slice(0, -4); type = 'pdf'; }
-    else continue;
-    if (!groups[base]) groups[base] = { name: base };
-    groups[base][type] = file;
+
+    if (/_ig\.(png|jpg|jpeg)$/i.test(name)) {
+      base = name.replace(/_ig\.(png|jpg|jpeg)$/i, ''); type = 'ig';
+    } else if (/_web\.(png|jpg|jpeg)$/i.test(name)) {
+      base = name.replace(/_web\.(png|jpg|jpeg)$/i, ''); type = 'web';
+    } else if (/\.pdf$/i.test(name)) {
+      base = name.replace(/\.pdf$/i, ''); type = 'pdf';
+    } else {
+      continue;
+    }
+
+    const lowerBase = base.toLowerCase();
+    if (!keyMap[lowerBase]) {
+      keyMap[lowerBase] = base;
+      groups[base] = { name: base };
+    }
+    const key = keyMap[lowerBase];
+    groups[key][type] = file;
   }
   return Object.values(groups).sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -391,11 +405,11 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
 app.get('/api/preview/:fileId', requireAuth, async (req, res) => {
   try {
     const drive = getDriveClient(req.user);
-    const response = await drive.files.get(
-      { fileId: req.params.fileId, alt: 'media', supportsAllDrives: true },
-      { responseType: 'stream' }
-    );
-    res.set('Content-Type', 'image/png');
+    const [meta, response] = await Promise.all([
+      drive.files.get({ fileId: req.params.fileId, fields: 'mimeType', supportsAllDrives: true }),
+      drive.files.get({ fileId: req.params.fileId, alt: 'media', supportsAllDrives: true }, { responseType: 'stream' }),
+    ]);
+    res.set('Content-Type', meta.data.mimeType || 'image/jpeg');
     res.set('Cache-Control', 'private, max-age=300');
     response.data.pipe(res);
   } catch (err) {
