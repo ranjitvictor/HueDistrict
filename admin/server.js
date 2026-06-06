@@ -4,6 +4,7 @@ const passport = require('passport');
 const { Strategy: GoogleStrategy } = require('passport-google-oauth20');
 const { google } = require('googleapis');
 const Anthropic = require('@anthropic-ai/sdk');
+const crypto = require('crypto');
 
 const ROOT_FOLDER_ID = '1018xTizZybeAjs-9wlgWzJWx7mSL0k5t';
 const REVIEW_FOLDER_NAME = 'Posters for Review';
@@ -72,6 +73,68 @@ function getDriveClient(user) {
 
 const folderCache = {};
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// ── Instagram ────────────────────────────────────────────
+const igImageCache = new Map(); // uuid → { buffer, mimeType }
+
+function storeForIG(buffer, mimeType, ttlMs = 15 * 60 * 1000) {
+  const id = crypto.randomUUID();
+  igImageCache.set(id, { buffer, mimeType });
+  setTimeout(() => igImageCache.delete(id), ttlMs);
+  return id;
+}
+
+function buildIgCaption(meta) {
+  const tags = Array.isArray(meta.hashtags) ? meta.hashtags.join(' ') : (meta.hashtags || '');
+  return [meta.caption, tags].filter(Boolean).join('\n\n');
+}
+
+async function igPost(imageUrl, caption) {
+  const uid = process.env.INSTAGRAM_USER_ID;
+  const tok = process.env.INSTAGRAM_ACCESS_TOKEN;
+  const base = `https://graph.facebook.com/v20.0`;
+
+  const cRes = await fetch(`${base}/${uid}/media`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image_url: imageUrl, caption, access_token: tok }),
+  });
+  const container = await cRes.json();
+  if (container.error) throw new Error(`IG container: ${container.error.message}`);
+
+  const pRes = await fetch(`${base}/${uid}/media_publish`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ creation_id: container.id, access_token: tok }),
+  });
+  const pub = await pRes.json();
+  if (pub.error) throw new Error(`IG publish: ${pub.error.message}`);
+  return pub.id;
+}
+
+async function igDelete(mediaId) {
+  const tok = process.env.INSTAGRAM_ACCESS_TOKEN;
+  const r = await fetch(
+    `https://graph.facebook.com/v20.0/${mediaId}?access_token=${encodeURIComponent(tok)}`,
+    { method: 'DELETE' }
+  );
+  const result = await r.json();
+  if (result.error) throw new Error(`IG delete: ${result.error.message}`);
+}
+
+async function igRepost(drive, igFileId, meta) {
+  const imgRes = await drive.files.get(
+    { fileId: igFileId, alt: 'media', supportsAllDrives: true },
+    { responseType: 'arraybuffer' }
+  );
+  const uuid = storeForIG(Buffer.from(imgRes.data), 'image/png');
+  const imageUrl = `${process.env.BASE_URL}/public/img/${uuid}`;
+  return igPost(imageUrl, buildIgCaption(meta));
+}
+
+function igConfigured() {
+  return !!(process.env.INSTAGRAM_USER_ID && process.env.INSTAGRAM_ACCESS_TOKEN);
+}
 
 async function findFolder(drive, parentId, name) {
   const key = `${parentId}:${name}`;
@@ -341,6 +404,29 @@ const loginPage = (error = '') => `<!DOCTYPE html>
 
 // ── Routes ──────────────────────────────────────────────
 
+// Public image endpoint — no auth, Instagram fetches from here
+app.get('/public/img/:uuid', (req, res) => {
+  const entry = igImageCache.get(req.params.uuid);
+  if (!entry) return res.status(404).send('Not found or expired');
+  res.set('Content-Type', entry.mimeType);
+  res.send(entry.buffer);
+});
+
+// Refresh Instagram long-lived token (valid 60 days, refresh before expiry)
+app.post('/api/ig-refresh-token', requireAuth, async (req, res) => {
+  try {
+    const tok = process.env.INSTAGRAM_ACCESS_TOKEN;
+    const r = await fetch(
+      `https://graph.facebook.com/v20.0/oauth/access_token?grant_type=ig_refresh_token&access_token=${encodeURIComponent(tok)}`
+    );
+    const result = await r.json();
+    if (result.error) return res.status(400).json(result);
+    res.json({ token: result.access_token, expiresIn: result.expires_in });
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
 app.get('/login', (req, res) => {
   const error = req.query.error === 'access_denied'
     ? 'Your account is not authorised to access this panel.'
@@ -461,6 +547,8 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
       ? posters.map(p => {
           const isListed = p.ig && listedNames.has(p.ig.name);
           const canApprove = p.ig && p.web;
+          const posterMeta = metaContent[p.name.toLowerCase()];
+          const igMediaId = posterMeta?.instagramMediaId || '';
           return `
             <div class="poster-card">
               <div class="poster-img-wrap">
@@ -474,10 +562,10 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
                 <div class="actions">
                   <div class="status-actions">
                     ${isListed
-                      ? `<div class="btn btn-listed">✓ Listed for Sale</div>
-                         <button class="btn btn-red" onclick="unlist(this,'${esc(folderName)}','${esc(p.ig?.name||'')}','${esc(p.web?.name||'')}','${p.ig?.id||''}','${p.web?.id||''}')">Unlist</button>`
+                      ? `<div class="btn btn-listed">✓ Listed for Sale${igMediaId ? ' · 📸 On Instagram' : ''}</div>
+                         <button class="btn btn-red" onclick="unlist(this,'${esc(folderName)}','${esc(p.ig?.name||'')}','${esc(p.web?.name||'')}','${p.ig?.id||''}','${p.web?.id||''}','${esc(igMediaId)}')">Unlist</button>`
                       : canApprove
-                        ? `<button class="btn btn-green" onclick="approve(this,'${esc(folderName)}','${p.ig.id}','${p.web.id}','${esc(p.ig.name)}','${esc(p.web.name)}')">Ready for Sale</button>`
+                        ? `<button class="btn btn-green" onclick="approve(this,'${esc(folderName)}','${esc(folderId)}','${esc(p.name)}','${p.ig.id}','${p.web.id}','${esc(p.ig.name)}','${esc(p.web.name)}')">Ready for Sale</button>`
                         : `<div class="badge-missing">Missing _ig or _web version</div>`}
                   </div>
                   ${p.pdf
@@ -540,10 +628,12 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
             body: JSON.stringify({ folderId, baseName, title, caption, hashtags }),
           });
           if (r.ok) {
+            const result = await r.json();
             btn.textContent = 'Save';
             const status = document.getElementById('status-' + baseName);
-            if (status) status.textContent = 'Saved just now';
-            showToast('Saved ✓');
+            const igNote = result.instagramMediaId ? ' · Instagram updated' : '';
+            if (status) status.textContent = 'Saved just now' + igNote;
+            showToast('Saved' + igNote + ' ✓');
           } else {
             btn.textContent = 'Save';
             showToast('Save failed: ' + await r.text());
@@ -554,20 +644,25 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
         }
       }
 
-      async function approve(btn, folderName, igId, webId, igName, webName) {
+      async function approve(btn, folderName, folderId, baseName, igId, webId, igName, webName) {
         btn.disabled = true;
         btn.textContent = 'Processing…';
+        const caption = document.getElementById('caption-' + baseName)?.value || '';
+        const hashtagsRaw = document.getElementById('hashtags-' + baseName)?.value || '';
+        const hashtags = hashtagsRaw.trim().split(/\s+/).filter(Boolean);
         try {
           const r = await fetch('/api/approve', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ folderName, igId, webId }),
+            body: JSON.stringify({ folderName, folderId, baseName, igId, webId, caption, hashtags }),
           });
           if (r.ok) {
+            const { instagramMediaId } = await r.json();
+            const igNote = instagramMediaId ? ' · Posted to Instagram' : '';
             btn.closest('.status-actions').innerHTML =
               '<div class="btn btn-listed">✓ Listed for Sale</div>' +
-              '<button class="btn btn-red" onclick="unlist(this,\\'' + folderName + '\\',\\'' + igName + '\\',\\'' + webName + '\\',\\'' + igId + '\\',\\'' + webId + '\\')">Unlist</button>';
-            showToast('Added to Posters for Sale ✓');
+              '<button class="btn btn-red" onclick="unlist(this,\\'' + folderName + '\\',\\'' + igName + '\\',\\'' + webName + '\\',\\'' + igId + '\\',\\'' + webId + '\\',\\'' + (instagramMediaId||'') + '\\')">Unlist</button>';
+            showToast('Added to Posters for Sale' + igNote + ' ✓');
           } else {
             btn.disabled = false;
             btn.textContent = 'Ready for Sale';
@@ -580,20 +675,21 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
         }
       }
 
-      async function unlist(btn, folderName, igName, webName, igId, webId) {
-        if (!confirm('Remove this poster from sale? The copies in Posters for Sale will be deleted.')) return;
+      async function unlist(btn, folderName, igName, webName, igId, webId, instagramMediaId) {
+        const igWarn = instagramMediaId ? ' The Instagram post will also be deleted.' : '';
+        if (!confirm('Remove this poster from sale?' + igWarn)) return;
         btn.disabled = true;
         btn.textContent = 'Removing…';
         try {
           const r = await fetch('/api/unlist', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ folderName, igName, webName }),
+            body: JSON.stringify({ folderName, igName, webName, instagramMediaId }),
           });
           if (r.ok) {
             btn.closest('.status-actions').innerHTML =
-              '<button class="btn btn-green" onclick="approve(this,\\'' + folderName + '\\',\\'' + igId + '\\',\\'' + webId + '\\',\\'' + igName + '\\',\\'' + webName + '\\')">Ready for Sale</button>';
-            showToast('Removed from Posters for Sale');
+              '<button class="btn btn-green" onclick="approve(this,\\'' + folderName + '\\',\\'' + _folderId + '\\',\\'' + igName.replace(/_ig\\.(png|jpg|jpeg)$/i,\\'\\') + '\\',\\'' + igId + '\\',\\'' + webId + '\\',\\'' + igName + '\\',\\'' + webName + '\\')">Ready for Sale</button>';
+            showToast(instagramMediaId ? 'Unlisted and removed from Instagram' : 'Removed from Posters for Sale');
           } else {
             btn.disabled = false;
             btn.textContent = 'Unlist';
@@ -656,22 +752,52 @@ app.get('/api/download/:fileId', requireAuth, async (req, res) => {
   }
 });
 
-// Copy _ig.png + _web.png to Posters for Sale
+// Copy _ig.png + _web.png to Posters for Sale and post to Instagram
 app.post('/api/approve', requireAuth, async (req, res) => {
   try {
-    const { folderName, igId, webId } = req.body;
+    const { folderName, folderId, baseName, igId, webId, caption, hashtags } = req.body;
     if (!folderName || !igId || !webId) return res.status(400).send('Missing fields');
 
     const drive = getDriveClient(req.user);
+
+    // Copy files to Posters for Sale
     const saleFolderId = await findFolder(drive, ROOT_FOLDER_ID, SALE_FOLDER_NAME);
     const destId = await getOrCreateSubfolder(drive, saleFolderId, folderName);
-
     await Promise.all([
       drive.files.copy({ fileId: igId, requestBody: { parents: [destId] }, supportsAllDrives: true }),
       drive.files.copy({ fileId: webId, requestBody: { parents: [destId] }, supportsAllDrives: true }),
     ]);
 
-    res.sendStatus(200);
+    // Post to Instagram
+    let instagramMediaId = null;
+    if (igConfigured() && folderId && baseName) {
+      const imgRes = await drive.files.get(
+        { fileId: igId, alt: 'media', supportsAllDrives: true },
+        { responseType: 'arraybuffer' }
+      );
+      const uuid = storeForIG(Buffer.from(imgRes.data), 'image/png');
+      const imageUrl = `${process.env.BASE_URL}/public/img/${uuid}`;
+      const igCaption = buildIgCaption({ caption: caption || baseName, hashtags: hashtags || [] });
+      instagramMediaId = await igPost(imageUrl, igCaption);
+
+      // Persist media ID and igFileId in meta.json
+      let existingMeta = {};
+      try {
+        const metaFiles = await drive.files.list({
+          q: `'${folderId}' in parents and name = '${baseName}_meta.json' and trashed = false`,
+          fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true,
+        });
+        if (metaFiles.data.files.length) {
+          existingMeta = await readMetaFromDrive(drive, metaFiles.data.files[0].id);
+        }
+      } catch {}
+      await saveMetaToDrive(drive, folderId, baseName, {
+        ...existingMeta, caption, hashtags, instagramMediaId, igFileId: igId,
+        modifiedAt: new Date().toISOString(),
+      });
+    }
+
+    res.json({ ok: true, instagramMediaId });
   } catch (err) {
     res.status(500).send(err.message);
   }
@@ -729,27 +855,58 @@ Reply ONLY with valid JSON, no markdown:
   }
 });
 
-// Save edited metadata
+// Save edited metadata — delete+repost to Instagram if already live
 app.post('/api/save-meta', requireAuth, async (req, res) => {
   try {
     const { folderId, baseName, title, caption, hashtags } = req.body;
     if (!folderId || !baseName) return res.status(400).send('Missing fields');
 
     const drive = getDriveClient(req.user);
-    const meta = { title, caption, hashtags, modifiedAt: new Date().toISOString() };
+
+    // Read existing meta to check for live IG post
+    let existingMeta = {};
+    try {
+      const metaFiles = await drive.files.list({
+        q: `'${folderId}' in parents and name = '${baseName}_meta.json' and trashed = false`,
+        fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true,
+      });
+      if (metaFiles.data.files.length) {
+        existingMeta = await readMetaFromDrive(drive, metaFiles.data.files[0].id);
+      }
+    } catch {}
+
+    let instagramMediaId = existingMeta.instagramMediaId || null;
+
+    // If already posted to IG, delete old post and repost with new caption
+    if (instagramMediaId && igConfigured() && existingMeta.igFileId) {
+      try { await igDelete(instagramMediaId); } catch {}
+      instagramMediaId = await igRepost(drive, existingMeta.igFileId, { caption, hashtags });
+    }
+
+    const meta = {
+      ...existingMeta, title, caption, hashtags,
+      instagramMediaId, modifiedAt: new Date().toISOString(),
+    };
     await saveMetaToDrive(drive, folderId, baseName, meta);
 
-    res.sendStatus(200);
+    res.json({ ok: true, instagramMediaId });
   } catch (err) {
     res.status(500).send(err.message);
   }
 });
 
-// Delete _ig + _web copies from Posters for Sale
+// Delete _ig + _web copies from Posters for Sale and remove Instagram post
 app.post('/api/unlist', requireAuth, async (req, res) => {
   try {
-    const { folderName, igName, webName } = req.body;
+    const { folderName, igName, webName, instagramMediaId } = req.body;
     if (!folderName || !igName || !webName) return res.status(400).send('Missing fields');
+
+    // Remove Instagram post
+    if (instagramMediaId && igConfigured()) {
+      try { await igDelete(instagramMediaId); } catch (e) {
+        console.error('IG delete failed:', e.message);
+      }
+    }
 
     const drive = getDriveClient(req.user);
     const saleFolderId = await findFolder(drive, ROOT_FOLDER_ID, SALE_FOLDER_NAME);
