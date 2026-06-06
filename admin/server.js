@@ -207,20 +207,22 @@ const css = `
   .email { font-size: 13px; color: #6b7280; }
   .btn-logout { font-size: 13px; color: #374151; text-decoration: none; padding: 5px 12px; border: 1px solid #d1d5db; border-radius: 6px; }
   .btn-logout:hover { background: #f3f4f6; }
-  main { max-width: 1200px; margin: 0 auto; padding: 32px 28px; }
+  main { max-width: 1400px; margin: 0 auto; padding: 32px 28px; }
   .page-hdr { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; }
   .back { font-size: 13px; color: #6b7280; text-decoration: none; white-space: nowrap; }
   .back:hover { color: #111; }
   h1 { font-size: 21px; font-weight: 600; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
+  .poster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(600px, 1fr)); gap: 20px; }
   .folder-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 20px; text-decoration: none; display: flex; flex-direction: column; gap: 10px; transition: box-shadow 0.15s; }
   .folder-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
   .folder-icon { font-size: 26px; }
   .folder-name { font-size: 14px; font-weight: 500; line-height: 1.4; }
-  .poster-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
-  .poster-img { width: 100%; aspect-ratio: 3/4; object-fit: cover; background: #e5e7eb; display: block; }
-  .poster-body { padding: 14px; display: flex; flex-direction: column; gap: 10px; flex: 1; }
-  .poster-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .poster-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; display: grid; grid-template-columns: 220px 1fr; min-height: 400px; }
+  .poster-img-wrap { overflow: hidden; }
+  .poster-img { width: 100%; height: 100%; object-fit: cover; background: #e5e7eb; display: block; }
+  .poster-body { padding: 20px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+  .poster-name { font-size: 15px; font-weight: 600; color: #111; }
   .actions { display: flex; flex-direction: column; gap: 7px; margin-top: auto; }
   .btn { padding: 8px 12px; border-radius: 6px; font-size: 13px; font-weight: 500; border: none; cursor: pointer; text-align: center; text-decoration: none; display: block; width: 100%; transition: opacity 0.15s; }
   .btn:hover:not(:disabled) { opacity: 0.85; }
@@ -432,8 +434,8 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
           <div class="meta-section">
             <div class="meta-label">Instagram Caption</div>
             <input class="meta-input" id="title-${safeBase}" value="${esc(meta.title || '')}" placeholder="Title">
-            <textarea class="meta-input" id="caption-${safeBase}" rows="3" placeholder="Caption">${esc(meta.caption || '')}</textarea>
-            <textarea class="meta-input" id="hashtags-${safeBase}" rows="2" placeholder="#hashtags">${esc(tags)}</textarea>
+            <textarea class="meta-input" id="caption-${safeBase}" rows="4" placeholder="Caption">${esc(meta.caption || '')}</textarea>
+            <textarea class="meta-input" id="hashtags-${safeBase}" rows="3" placeholder="#hashtags">${esc(tags)}</textarea>
             <div class="meta-row">
               <button class="btn-save" onclick="saveMeta(this,'${esc(folderId)}','${safeBase}')">Save</button>
               <button class="btn-ghost" onclick="generateMeta(this,'${esc(folderId)}','${safeBase}','${webId}','${esc(webMime)}','${esc(folderName)}')">↺ Regenerate</button>
@@ -461,9 +463,11 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
           const canApprove = p.ig && p.web;
           return `
             <div class="poster-card">
-              ${p.web
-                ? `<img class="poster-img" src="/api/preview/${esc(p.web.id)}" alt="${esc(p.name)}" loading="lazy" onclick="openLightbox(this.src,'${esc(p.name)}')">`
-                : `<div class="poster-img"></div>`}
+              <div class="poster-img-wrap">
+                ${p.web
+                  ? `<img class="poster-img" src="/api/preview/${esc(p.web.id)}" alt="${esc(p.name)}" loading="lazy" onclick="openLightbox(this.src,'${esc(p.name)}')">`
+                  : `<div class="poster-img"></div>`}
+              </div>
               <div class="poster-body">
                 <div class="poster-name" title="${esc(p.name)}">${esc(p.name)}</div>
                 ${metaSection(p)}
@@ -613,7 +617,7 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
         <a href="/" class="back">← All folders</a>
         <h1>${esc(folderName)}</h1>
       </div>
-      <div class="grid">${cards}</div>
+      <div class="poster-grid">${cards}</div>
     `, script));
   } catch (err) {
     res.status(500).send(`<pre>Error: ${esc(err.message)}</pre>`);
