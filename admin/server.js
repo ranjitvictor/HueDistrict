@@ -189,6 +189,190 @@ async function readMetaFromDrive(drive, fileId) {
   return JSON.parse(Buffer.from(r.data).toString('utf8'));
 }
 
+async function readDriveJson(drive, folderId, filename) {
+  const res = await drive.files.list({
+    q: `'${folderId}' in parents and name = '${filename}' and trashed = false`,
+    fields: 'files(id)',
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+  });
+  if (!res.data.files.length) return null;
+  return readMetaFromDrive(drive, res.data.files[0].id);
+}
+
+async function writeDriveJson(drive, folderId, filename, data) {
+  const body = JSON.stringify(data, null, 2);
+  const existing = await drive.files.list({
+    q: `'${folderId}' in parents and name = '${filename}' and trashed = false`,
+    fields: 'files(id)',
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+  });
+  if (existing.data.files.length) {
+    await drive.files.update({
+      fileId: existing.data.files[0].id,
+      requestBody: {},
+      media: { mimeType: 'application/json', body },
+      supportsAllDrives: true,
+    });
+  } else {
+    await drive.files.create({
+      requestBody: { name: filename, parents: [folderId], mimeType: 'application/json' },
+      media: { mimeType: 'application/json', body },
+      supportsAllDrives: true,
+      fields: 'id',
+    });
+  }
+}
+
+function buildPricingScript(config) {
+  return `
+    var cfg = ${JSON.stringify(config)};
+
+    function h(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function calcTotal(size) {
+      return cfg.categories.reduce(function(s,c){ return s + (Number(size.costs[c])||0); }, 0);
+    }
+    function calcPrice(size) {
+      return Math.round(calcTotal(size) * (1 + (Number(size.markup)||0) / 100));
+    }
+    function syncState() {
+      cfg.sizes.forEach(function(size, si) {
+        var n = document.getElementById('sn-'+si); if (n) size.name = n.value;
+        var m = document.getElementById('sm-'+si); if (m) size.markup = Number(m.value)||0;
+        cfg.categories.forEach(function(cat, ci) {
+          var el = document.getElementById('c-'+si+'-'+ci);
+          if (el) size.costs[cat] = Number(el.value)||0;
+        });
+      });
+    }
+    function render() {
+      var cats = cfg.categories.map(function(cat, i) {
+        return '<span class="p-tag"><span class="p-tag-label" contenteditable="true"' +
+          ' onblur="renameCategory('+i+', this.textContent.trim())"' +
+          ' onkeydown="if(event.key===\'Enter\'){event.preventDefault();this.blur()}">' +
+          h(cat) + '</span>' +
+          '<button class="tag-del" onclick="removeCategory('+i+')">&#215;</button></span>';
+      }).join('');
+
+      var catTh = cfg.categories.map(function(cat) {
+        return '<th class="pt-th">' + h(cat) + ' (&#8377;)</th>';
+      }).join('');
+
+      var rows = cfg.sizes.map(function(size, si) {
+        var cells = cfg.categories.map(function(cat, ci) {
+          return '<td><input class="price-input" id="c-'+si+'-'+ci+'" type="number" min="0"' +
+            ' value="'+(size.costs[cat]||0)+'" oninput="updateRow('+si+')" placeholder="0"></td>';
+        }).join('');
+        return '<tr>' +
+          '<td><input class="size-input" id="sn-'+si+'" value="'+h(size.name)+'" placeholder="Size"></td>' +
+          cells +
+          '<td><input class="price-input" id="sm-'+si+'" type="number" min="0"' +
+            ' value="'+(size.markup||40)+'" oninput="updateRow('+si+')" placeholder="40"></td>' +
+          '<td class="computed-cell" id="total-'+si+'">&#8377;'+Math.round(calcTotal(size))+'</td>' +
+          '<td class="price-cell" id="price-'+si+'">&#8377;'+calcPrice(size)+'</td>' +
+          '<td><button class="del-btn" title="Remove" onclick="removeSize('+si+')">&#215;</button></td>' +
+          '</tr>';
+      }).join('');
+
+      document.getElementById('pricing-app').innerHTML =
+        '<div class="section-card">' +
+          '<div class="section-title">Expense Categories</div>' +
+          '<p class="section-hint">Click a label to rename it.</p>' +
+          '<div class="tags-row">' + cats +
+            '<button class="btn-ghost" onclick="addCategory()">+ Add expense</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="section-card">' +
+          '<div class="section-title">Size Pricing</div>' +
+          '<div style="overflow-x:auto">' +
+            '<table class="pricing-table"><thead><tr>' +
+              '<th class="pt-th">Size</th>' + catTh +
+              '<th class="pt-th">Markup %</th>' +
+              '<th class="pt-th" style="text-align:right;padding-right:16px">Total Cost</th>' +
+              '<th class="pt-th" style="text-align:right;padding-right:16px">Selling Price</th>' +
+              '<th></th>' +
+            '</tr></thead>' +
+            '<tbody>' + rows + '</tbody>' +
+            '</table>' +
+          '</div>' +
+          '<div style="margin-top:14px">' +
+            '<button class="btn-ghost" onclick="addSize()">+ Add size</button>' +
+          '</div>' +
+        '</div>';
+    }
+
+    function updateRow(si) {
+      var size = cfg.sizes[si];
+      cfg.categories.forEach(function(cat, ci) {
+        var el = document.getElementById('c-'+si+'-'+ci);
+        if (el) size.costs[cat] = Number(el.value)||0;
+      });
+      var m = document.getElementById('sm-'+si); if (m) size.markup = Number(m.value)||0;
+      var tc = document.getElementById('total-'+si);
+      var pc = document.getElementById('price-'+si);
+      if (tc) tc.textContent = '₹' + Math.round(calcTotal(size));
+      if (pc) pc.textContent = '₹' + calcPrice(size);
+    }
+
+    function renameCategory(i, newName) {
+      if (!newName || newName === cfg.categories[i]) return;
+      syncState();
+      var old = cfg.categories[i];
+      cfg.categories[i] = newName;
+      cfg.sizes.forEach(function(s) { s.costs[newName] = s.costs[old]||0; delete s.costs[old]; });
+      render();
+    }
+    function addCategory() {
+      syncState();
+      var name = 'New Expense';
+      cfg.categories.push(name);
+      cfg.sizes.forEach(function(s) { s.costs[name] = 0; });
+      render();
+    }
+    function removeCategory(i) {
+      syncState();
+      var cat = cfg.categories[i];
+      cfg.categories.splice(i, 1);
+      cfg.sizes.forEach(function(s) { delete s.costs[cat]; });
+      render();
+    }
+    function addSize() {
+      syncState();
+      var costs = {};
+      cfg.categories.forEach(function(c) { costs[c] = 0; });
+      cfg.sizes.push({ name: 'New Size', costs: costs, markup: 40 });
+      render();
+    }
+    function removeSize(i) {
+      syncState();
+      cfg.sizes.splice(i, 1);
+      render();
+    }
+    async function saveConfig() {
+      syncState();
+      cfg.sizes.forEach(function(size, si) {
+        var n = document.getElementById('sn-'+si); if (n) size.name = n.value || size.name;
+      });
+      var btn = document.getElementById('save-btn');
+      if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+      try {
+        var r = await fetch('/api/pricing/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(cfg)
+        });
+        if (r.ok) { showToast('Pricing saved ✓'); }
+        else { showToast('Error: ' + await r.text()); }
+      } catch(e) { showToast('Network error'); }
+      if (btn) { btn.disabled = false; btn.textContent = 'Save Configuration'; }
+    }
+    render();
+  `;
+}
+
 function esc(str) {
   return String(str)
     .replace(/&/g, '&amp;')
@@ -237,6 +421,29 @@ const css = `
   .toast { position: fixed; bottom: 24px; right: 24px; background: #111; color: #fff; padding: 12px 20px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity 0.25s; pointer-events: none; z-index: 100; }
   .toast.show { opacity: 1; }
   .badge-missing { font-size: 11px; color: #9ca3af; text-align: center; }
+  .nav-link { font-size: 13px; color: #6b7280; text-decoration: none; padding: 4px 0; border-bottom: 2px solid transparent; }
+  .nav-link:hover, .nav-link.active { color: #111; border-bottom-color: #111; }
+  .section-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; margin-bottom: 20px; }
+  .section-title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .section-hint { font-size: 12px; color: #9ca3af; margin-bottom: 14px; }
+  .tags-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .p-tag { display: inline-flex; align-items: center; gap: 4px; background: #f3f4f6; border-radius: 6px; padding: 5px 6px 5px 10px; font-size: 13px; }
+  .p-tag-label { outline: none; min-width: 40px; }
+  .p-tag-label:focus { background: #fff; border-radius: 3px; padding: 0 2px; }
+  .tag-del { background: none; border: none; cursor: pointer; color: #9ca3af; font-size: 15px; line-height: 1; padding: 0 2px; }
+  .tag-del:hover { color: #b91c1c; }
+  .pricing-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 500px; }
+  .pt-th { text-align: left; padding: 8px 10px; border-bottom: 2px solid #e5e7eb; color: #6b7280; font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap; }
+  .pricing-table td { padding: 6px 8px; border-bottom: 1px solid #f3f4f6; vertical-align: middle; }
+  .pricing-table tr:last-child td { border-bottom: none; }
+  .price-input { border: 1px solid #e5e7eb; border-radius: 6px; padding: 6px 8px; font-size: 13px; width: 90px; text-align: right; font-family: inherit; background: #fafafa; }
+  .price-input:focus { outline: none; border-color: #6b7280; background: #fff; }
+  .size-input { border: 1px solid #e5e7eb; border-radius: 6px; padding: 6px 8px; font-size: 13px; font-weight: 600; width: 72px; font-family: inherit; background: #fafafa; }
+  .size-input:focus { outline: none; border-color: #6b7280; background: #fff; }
+  .computed-cell { color: #374151; font-weight: 500; text-align: right; padding-right: 16px !important; white-space: nowrap; }
+  .price-cell { color: #16a34a; font-weight: 700; text-align: right; padding-right: 16px !important; white-space: nowrap; font-size: 14px; }
+  .del-btn { background: none; border: none; color: #d1d5db; cursor: pointer; font-size: 18px; padding: 2px 6px; border-radius: 4px; }
+  .del-btn:hover { color: #b91c1c; background: #fee2e2; }
   .meta-section { border-top: 1px solid #f3f4f6; padding-top: 10px; display: flex; flex-direction: column; gap: 7px; }
   .meta-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: #9ca3af; }
   .meta-input { width: 100%; font-size: 13px; font-family: inherit; border: 1px solid #e5e7eb; border-radius: 6px; padding: 6px 8px; color: #111; background: #fafafa; resize: none; transition: border-color 0.15s; }
@@ -279,6 +486,10 @@ const toastScript = `
 `;
 
 function layout(title, user, body, extraScript = '') {
+  const nav = [
+    { href: '/', label: 'Posters' },
+    { href: '/pricing', label: 'Pricing' },
+  ].map(l => `<a href="${l.href}" class="nav-link${title === l.label || (l.href === '/' && title !== 'Pricing') ? ' active' : ''}">${l.label}</a>`).join('');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -289,7 +500,10 @@ function layout(title, user, body, extraScript = '') {
 </head>
 <body>
   <header>
-    <a href="/" class="logo">HueDistrict Admin</a>
+    <div style="display:flex;align-items:center;gap:24px">
+      <a href="/" class="logo">HueDistrict Admin</a>
+      <nav style="display:flex;gap:20px">${nav}</nav>
+    </div>
     <div class="hdr-right">
       <span class="email">${esc(user.email)}</span>
       <a href="/logout" class="btn-logout">Sign out</a>
@@ -774,6 +988,47 @@ app.post('/api/unlist', requireAuth, async (req, res) => {
       drive.files.delete({ fileId: f.id, supportsAllDrives: true })
     ));
 
+    res.sendStatus(200);
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
+// Pricing configuration
+app.get('/pricing', requireAuth, async (req, res) => {
+  try {
+    const drive = getDriveClient(req.user);
+    const config = await readDriveJson(drive, ROOT_FOLDER_ID, '_hd_pricing.json') || {
+      categories: ['Printing', 'Packaging', 'Shipping'],
+      sizes: [
+        { name: 'A1', costs: { Printing: 0, Packaging: 0, Shipping: 0 }, markup: 40 },
+        { name: 'A2', costs: { Printing: 0, Packaging: 0, Shipping: 0 }, markup: 40 },
+        { name: 'A3', costs: { Printing: 0, Packaging: 0, Shipping: 0 }, markup: 40 },
+      ],
+    };
+    res.send(layout('Pricing', req.user, `
+      <div class="page-hdr"><h1>Pricing Configuration</h1></div>
+      <div id="pricing-app"></div>
+      <div style="margin-top:8px">
+        <button id="save-btn" class="btn btn-green" style="width:auto;padding:10px 28px;border-radius:8px;font-size:14px" onclick="saveConfig()">Save Configuration</button>
+      </div>
+    `, buildPricingScript(config)));
+  } catch (err) {
+    res.status(500).send(`<pre>Error: ${esc(err.message)}</pre>`);
+  }
+});
+
+app.post('/api/pricing/save', requireAuth, async (req, res) => {
+  try {
+    const config = req.body;
+    if (!Array.isArray(config.categories) || !Array.isArray(config.sizes)) {
+      return res.status(400).send('Invalid config');
+    }
+    const drive = getDriveClient(req.user);
+    await writeDriveJson(drive, ROOT_FOLDER_ID, '_hd_pricing.json', {
+      ...config,
+      updatedAt: new Date().toISOString(),
+    });
     res.sendStatus(200);
   } catch (err) {
     res.status(500).send(err.message);
