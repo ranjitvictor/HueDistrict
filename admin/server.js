@@ -225,153 +225,110 @@ async function writeDriveJson(drive, folderId, filename, data) {
   }
 }
 
-function buildPricingScript(config) {
+function renderPricingHTML(config) {
+  const cats = config.categories.map((cat, i) =>
+    '<span class="p-tag">' +
+    '<span class="p-tag-label" id="cat-label-' + i + '" contenteditable="true" ' +
+    'onblur="renameCategory(' + i + ', this.textContent.trim())" ' +
+    'onkeydown="if(event.key===\'Enter\'){event.preventDefault();this.blur()}">' +
+    esc(cat) + '</span>' +
+    '<button class="tag-del" onclick="removeCategory(' + i + ')">&#215;</button>' +
+    '</span>'
+  ).join('');
+
+  const catTh = config.categories.map(cat =>
+    `<th class="pt-th">${esc(cat)} (&#8377;)</th>`).join('');
+
+  const rows = config.sizes.map((size, si) => {
+    const total = config.categories.reduce((s, c) => s + (Number(size.costs[c]) || 0), 0);
+    const price = Math.round(total * (1 + (Number(size.markup) || 0) / 100));
+    const cells = config.categories.map((cat, ci) =>
+      `<td><input class="price-input" id="c-${si}-${ci}" type="number" min="0" value="${Number(size.costs[cat]) || 0}" oninput="updateRow(${si})" placeholder="0"></td>`
+    ).join('');
+    return `<tr>
+      <td><input class="size-input" id="sn-${si}" value="${esc(size.name)}" placeholder="Size"></td>
+      ${cells}
+      <td><input class="price-input" id="sm-${si}" type="number" min="0" value="${Number(size.markup) || 40}" oninput="updateRow(${si})" placeholder="40"></td>
+      <td class="computed-cell" id="total-${si}">&#8377;${Math.round(total)}</td>
+      <td class="price-cell" id="price-${si}">&#8377;${price}</td>
+      <td><button class="del-btn" onclick="removeSize(${si})">&#215;</button></td>
+    </tr>`;
+  }).join('');
+
   return `
-    var cfg = ${JSON.stringify(config)};
-
-    function h(s) {
-      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-    }
-    function calcTotal(size) {
-      return cfg.categories.reduce(function(s,c){ return s + (Number(size.costs[c])||0); }, 0);
-    }
-    function calcPrice(size) {
-      return Math.round(calcTotal(size) * (1 + (Number(size.markup)||0) / 100));
-    }
-    function syncState() {
-      cfg.sizes.forEach(function(size, si) {
-        var n = document.getElementById('sn-'+si); if (n) size.name = n.value;
-        var m = document.getElementById('sm-'+si); if (m) size.markup = Number(m.value)||0;
-        cfg.categories.forEach(function(cat, ci) {
-          var el = document.getElementById('c-'+si+'-'+ci);
-          if (el) size.costs[cat] = Number(el.value)||0;
-        });
-      });
-    }
-    function render() {
-      var cats = cfg.categories.map(function(cat, i) {
-        return '<span class="p-tag"><span class="p-tag-label" contenteditable="true"' +
-          ' onblur="renameCategory('+i+', this.textContent.trim())"' +
-          ' onkeydown="if(event.key===\'Enter\'){event.preventDefault();this.blur()}">' +
-          h(cat) + '</span>' +
-          '<button class="tag-del" onclick="removeCategory('+i+')">&#215;</button></span>';
-      }).join('');
-
-      var catTh = cfg.categories.map(function(cat) {
-        return '<th class="pt-th">' + h(cat) + ' (&#8377;)</th>';
-      }).join('');
-
-      var rows = cfg.sizes.map(function(size, si) {
-        var cells = cfg.categories.map(function(cat, ci) {
-          return '<td><input class="price-input" id="c-'+si+'-'+ci+'" type="number" min="0"' +
-            ' value="'+(size.costs[cat]||0)+'" oninput="updateRow('+si+')" placeholder="0"></td>';
-        }).join('');
-        return '<tr>' +
-          '<td><input class="size-input" id="sn-'+si+'" value="'+h(size.name)+'" placeholder="Size"></td>' +
-          cells +
-          '<td><input class="price-input" id="sm-'+si+'" type="number" min="0"' +
-            ' value="'+(size.markup||40)+'" oninput="updateRow('+si+')" placeholder="40"></td>' +
-          '<td class="computed-cell" id="total-'+si+'">&#8377;'+Math.round(calcTotal(size))+'</td>' +
-          '<td class="price-cell" id="price-'+si+'">&#8377;'+calcPrice(size)+'</td>' +
-          '<td><button class="del-btn" title="Remove" onclick="removeSize('+si+')">&#215;</button></td>' +
-          '</tr>';
-      }).join('');
-
-      document.getElementById('pricing-app').innerHTML =
-        '<div class="section-card">' +
-          '<div class="section-title">Expense Categories</div>' +
-          '<p class="section-hint">Click a label to rename it.</p>' +
-          '<div class="tags-row">' + cats +
-            '<button class="btn-ghost" onclick="addCategory()">+ Add expense</button>' +
-          '</div>' +
-        '</div>' +
-        '<div class="section-card">' +
-          '<div class="section-title">Size Pricing</div>' +
-          '<div style="overflow-x:auto">' +
-            '<table class="pricing-table"><thead><tr>' +
-              '<th class="pt-th">Size</th>' + catTh +
-              '<th class="pt-th">Markup %</th>' +
-              '<th class="pt-th" style="text-align:right;padding-right:16px">Total Cost</th>' +
-              '<th class="pt-th" style="text-align:right;padding-right:16px">Selling Price</th>' +
-              '<th></th>' +
-            '</tr></thead>' +
-            '<tbody>' + rows + '</tbody>' +
-            '</table>' +
-          '</div>' +
-          '<div style="margin-top:14px">' +
-            '<button class="btn-ghost" onclick="addSize()">+ Add size</button>' +
-          '</div>' +
-        '</div>';
-    }
-
-    function updateRow(si) {
-      var size = cfg.sizes[si];
-      cfg.categories.forEach(function(cat, ci) {
-        var el = document.getElementById('c-'+si+'-'+ci);
-        if (el) size.costs[cat] = Number(el.value)||0;
-      });
-      var m = document.getElementById('sm-'+si); if (m) size.markup = Number(m.value)||0;
-      var tc = document.getElementById('total-'+si);
-      var pc = document.getElementById('price-'+si);
-      if (tc) tc.textContent = '₹' + Math.round(calcTotal(size));
-      if (pc) pc.textContent = '₹' + calcPrice(size);
-    }
-
-    function renameCategory(i, newName) {
-      if (!newName || newName === cfg.categories[i]) return;
-      syncState();
-      var old = cfg.categories[i];
-      cfg.categories[i] = newName;
-      cfg.sizes.forEach(function(s) { s.costs[newName] = s.costs[old]||0; delete s.costs[old]; });
-      render();
-    }
-    function addCategory() {
-      syncState();
-      var name = 'New Expense';
-      cfg.categories.push(name);
-      cfg.sizes.forEach(function(s) { s.costs[name] = 0; });
-      render();
-    }
-    function removeCategory(i) {
-      syncState();
-      var cat = cfg.categories[i];
-      cfg.categories.splice(i, 1);
-      cfg.sizes.forEach(function(s) { delete s.costs[cat]; });
-      render();
-    }
-    function addSize() {
-      syncState();
-      var costs = {};
-      cfg.categories.forEach(function(c) { costs[c] = 0; });
-      cfg.sizes.push({ name: 'New Size', costs: costs, markup: 40 });
-      render();
-    }
-    function removeSize(i) {
-      syncState();
-      cfg.sizes.splice(i, 1);
-      render();
-    }
-    async function saveConfig() {
-      syncState();
-      cfg.sizes.forEach(function(size, si) {
-        var n = document.getElementById('sn-'+si); if (n) size.name = n.value || size.name;
-      });
-      var btn = document.getElementById('save-btn');
-      if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
-      try {
-        var r = await fetch('/api/pricing/save', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(cfg)
-        });
-        if (r.ok) { showToast('Pricing saved ✓'); }
-        else { showToast('Error: ' + await r.text()); }
-      } catch(e) { showToast('Network error'); }
-      if (btn) { btn.disabled = false; btn.textContent = 'Save Configuration'; }
-    }
-    render();
-  `;
+    <div class="section-card">
+      <div class="section-title">Expense Categories</div>
+      <p class="section-hint">Click a label to rename. Changes apply on Save.</p>
+      <div class="tags-row">${cats}<button class="btn-ghost" onclick="addCategory()">+ Add expense</button></div>
+    </div>
+    <div class="section-card">
+      <div class="section-title">Size Pricing</div>
+      <div style="overflow-x:auto">
+        <table class="pricing-table">
+          <thead><tr>
+            <th class="pt-th">Size</th>${catTh}
+            <th class="pt-th">Markup %</th>
+            <th class="pt-th" style="text-align:right;padding-right:16px">Total Cost</th>
+            <th class="pt-th" style="text-align:right;padding-right:16px">Selling Price</th>
+            <th></th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div style="margin-top:14px"><button class="btn-ghost" onclick="addSize()">+ Add size</button></div>
+    </div>
+    <div style="margin-top:8px">
+      <button id="save-btn" class="btn btn-green" style="width:auto;padding:10px 28px;border-radius:8px;font-size:14px" onclick="saveConfig()">Save Configuration</button>
+    </div>`;
 }
+
+function buildPricingScript(config) {
+  return `var cfg = ${JSON.stringify(config)};
+    function calcTotal(s) { return cfg.categories.reduce(function(t,c){return t+(Number(s.costs[c])||0);},0); }
+    function calcPrice(s) { return Math.round(calcTotal(s)*(1+(Number(s.markup)||0)/100)); }
+    function syncInputs() {
+      cfg.sizes.forEach(function(size,si){
+        var n=document.getElementById('sn-'+si); if(n) size.name=n.value;
+        var m=document.getElementById('sm-'+si); if(m) size.markup=Number(m.value)||0;
+        cfg.categories.forEach(function(cat,ci){
+          var el=document.getElementById('c-'+si+'-'+ci); if(el) size.costs[cat]=Number(el.value)||0;
+        });
+      });
+      cfg.categories.forEach(function(cat,i){
+        var el=document.getElementById('cat-label-'+i); if(el) cfg.categories[i]=el.textContent.trim()||cat;
+      });
+    }
+    function updateRow(si) {
+      syncInputs();
+      var size=cfg.sizes[si];
+      var tc=document.getElementById('total-'+si); if(tc) tc.textContent='\u20B9'+Math.round(calcTotal(size));
+      var pc=document.getElementById('price-'+si); if(pc) pc.textContent='\u20B9'+calcPrice(size);
+    }
+    async function postAndReload() {
+      var r=await fetch('/api/pricing/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+      if(r.ok){window.location.reload();}else{showToast('Error: '+await r.text());}
+    }
+    function renameCategory(i,newName) {
+      if(!newName||newName===cfg.categories[i]) return;
+      var old=cfg.categories[i]; cfg.categories[i]=newName;
+      cfg.sizes.forEach(function(s){s.costs[newName]=s.costs[old]||0;delete s.costs[old];});
+    }
+    async function addCategory(){syncInputs();cfg.categories.push('New Expense');cfg.sizes.forEach(function(s){s.costs['New Expense']=0;});await postAndReload();}
+    async function removeCategory(i){syncInputs();var c=cfg.categories[i];cfg.categories.splice(i,1);cfg.sizes.forEach(function(s){delete s.costs[c];});await postAndReload();}
+    async function addSize(){syncInputs();var costs={};cfg.categories.forEach(function(c){costs[c]=0;});cfg.sizes.push({name:'New Size',costs:costs,markup:40});await postAndReload();}
+    async function removeSize(i){syncInputs();cfg.sizes.splice(i,1);await postAndReload();}
+    async function saveConfig(){
+      syncInputs();
+      var btn=document.getElementById('save-btn');
+      if(btn){btn.disabled=true;btn.textContent='Saving\u2026';}
+      try{
+        var r=await fetch('/api/pricing/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+        if(r.ok){showToast('Pricing saved \u2713');}else{showToast('Error: '+await r.text());}
+      }catch(e){showToast('Network error');}
+      if(btn){btn.disabled=false;btn.textContent='Save Configuration';}
+    }`;
+}
+
 
 function esc(str) {
   return String(str)
@@ -1008,10 +965,7 @@ app.get('/pricing', requireAuth, async (req, res) => {
     };
     res.send(layout('Pricing', req.user, `
       <div class="page-hdr"><h1>Pricing Configuration</h1></div>
-      <div id="pricing-app"></div>
-      <div style="margin-top:8px">
-        <button id="save-btn" class="btn btn-green" style="width:auto;padding:10px 28px;border-radius:8px;font-size:14px" onclick="saveConfig()">Save Configuration</button>
-      </div>
+      ${renderPricingHTML(config)}
     `, buildPricingScript(config)));
   } catch (err) {
     res.status(500).send(`<pre>Error: ${esc(err.message)}</pre>`);
