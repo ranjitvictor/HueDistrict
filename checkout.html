@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Checkout — HueDistrict</title>
+  <link rel="icon" type="image/png" href="/ig-pfp-1080.png">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --ink: #15110D; --paper: #F4ECDC; --bone: #FBF6EB;
+      --pink: #FF2D6F; --blue: #2433E8;
+      --line: rgba(21,17,13,0.12);
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--paper); color: var(--ink); min-height: 100vh; }
+
+    header { background: var(--ink); height: 56px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; }
+    .logo { color: var(--paper); font-size: 18px; font-weight: 800; text-decoration: none; letter-spacing: -0.03em; }
+    .back { color: rgba(244,236,220,0.55); font-size: 13px; text-decoration: none; }
+    .back:hover { color: var(--paper); }
+
+    .container { max-width: 960px; margin: 0 auto; padding: 36px 20px; display: grid; grid-template-columns: 340px 1fr; gap: 28px; align-items: start; }
+
+    /* Summary */
+    .summary { background: var(--bone); border: 1px solid var(--line); border-radius: 14px; padding: 24px; position: sticky; top: 24px; }
+    .summary-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: rgba(21,17,13,0.4); margin-bottom: 16px; }
+    .item { display: flex; justify-content: space-between; align-items: flex-start; padding: 12px 0; border-bottom: 1px solid var(--line); gap: 8px; }
+    .item:last-of-type { border-bottom: none; }
+    .item-name { font-size: 14px; font-weight: 600; }
+    .item-meta { font-size: 12px; color: rgba(21,17,13,0.45); margin-top: 2px; }
+    .item-price { font-size: 14px; font-weight: 600; white-space: nowrap; }
+    .total-row { display: flex; justify-content: space-between; align-items: center; padding-top: 14px; border-top: 2px solid var(--ink); margin-top: 4px; }
+    .total-label { font-size: 13px; font-weight: 600; }
+    .total-val { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; }
+    .ref-box { margin-top: 16px; background: var(--paper); border-radius: 8px; padding: 12px; }
+    .ref-label { font-size: 11px; color: rgba(21,17,13,0.45); font-weight: 500; }
+    .ref-val { font-family: monospace; font-size: 14px; font-weight: 700; letter-spacing: 0.04em; margin-top: 2px; }
+
+    /* Form cards */
+    .card { background: var(--bone); border: 1px solid var(--line); border-radius: 14px; padding: 24px; margin-bottom: 16px; }
+    .card-title { font-size: 15px; font-weight: 700; margin-bottom: 18px; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+    .field:last-child { margin-bottom: 0; }
+    label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: rgba(21,17,13,0.5); }
+    input, textarea { border: 1.5px solid var(--line); border-radius: 8px; padding: 10px 12px; font-size: 14px; font-family: inherit; background: var(--paper); color: var(--ink); transition: border-color 0.15s; }
+    input:focus, textarea:focus { outline: none; border-color: var(--ink); }
+    textarea { resize: vertical; min-height: 72px; }
+    input.err { border-color: #ef4444; }
+
+    /* Payment tabs */
+    .pay-tabs { display: grid; grid-template-columns: repeat(3, 1fr); border: 1.5px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 20px; }
+    .pay-tab { padding: 10px 6px; text-align: center; font-size: 12px; font-weight: 600; cursor: pointer; background: var(--paper); border: none; color: rgba(21,17,13,0.45); border-right: 1.5px solid var(--line); font-family: inherit; transition: all 0.15s; line-height: 1.3; }
+    .pay-tab:last-child { border-right: none; }
+    .pay-tab.active { background: var(--ink); color: var(--paper); }
+    .pay-panel { display: none; }
+    .pay-panel.active { display: block; }
+
+    /* QR */
+    .qr-box { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 20px; background: var(--paper); border: 1.5px solid var(--line); border-radius: 12px; }
+    #qr-canvas { border-radius: 6px; }
+    .qr-hint { font-size: 12px; color: rgba(21,17,13,0.45); text-align: center; max-width: 220px; line-height: 1.5; }
+
+    /* UPI link */
+    .upi-btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 14px; background: var(--ink); color: var(--paper); border: none; border-radius: 10px; font-size: 15px; font-weight: 700; text-decoration: none; cursor: pointer; margin-bottom: 14px; font-family: inherit; }
+    .upi-btn:hover { opacity: 0.88; }
+    .app-chips { display: flex; flex-wrap: wrap; gap: 7px; }
+    .chip { font-size: 12px; background: var(--paper); border: 1.5px solid var(--line); border-radius: 20px; padding: 4px 12px; color: rgba(21,17,13,0.6); }
+
+    /* UPI ID */
+    .upi-id-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px; background: var(--paper); border: 1.5px solid var(--line); border-radius: 10px; margin-bottom: 12px; }
+    .upi-id-val { font-family: monospace; font-size: 16px; font-weight: 700; letter-spacing: 0.02em; word-break: break-all; }
+    .copy-btn { flex-shrink: 0; font-size: 12px; font-weight: 600; padding: 7px 14px; background: var(--ink); color: var(--paper); border: none; border-radius: 7px; cursor: pointer; font-family: inherit; transition: opacity 0.15s; }
+    .copy-btn:hover { opacity: 0.85; }
+
+    /* Payer UPI */
+    .payer-section { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }
+    .payer-hint { font-size: 12px; color: rgba(21,17,13,0.5); margin-bottom: 8px; line-height: 1.5; }
+
+    /* Amount reminder */
+    .amount-reminder { display: flex; align-items: center; justify-content: space-between; background: #fefce8; border: 1px solid #fde68a; border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; }
+    .amount-reminder-text { font-size: 13px; color: #92400e; }
+    .amount-reminder-val { font-size: 18px; font-weight: 800; color: #92400e; }
+
+    /* Submit */
+    .submit-btn { width: 100%; padding: 16px; background: var(--pink); color: #fff; border: none; border-radius: 12px; font-size: 16px; font-weight: 800; cursor: pointer; letter-spacing: -0.01em; font-family: inherit; transition: opacity 0.15s; }
+    .submit-btn:hover { opacity: 0.9; }
+    .submit-btn:disabled { opacity: 0.45; cursor: default; }
+
+    /* Confirmation */
+    #confirmation { display: none; max-width: 520px; margin: 60px auto; padding: 0 20px; text-align: center; }
+    .conf-icon { font-size: 52px; margin-bottom: 20px; }
+    .conf-title { font-size: 26px; font-weight: 800; margin-bottom: 8px; letter-spacing: -0.02em; }
+    .conf-sub { font-size: 15px; color: rgba(21,17,13,0.55); margin-bottom: 28px; line-height: 1.6; }
+    .conf-id { display: inline-block; font-family: monospace; font-size: 20px; font-weight: 800; background: var(--bone); border: 1.5px solid var(--line); padding: 12px 28px; border-radius: 10px; letter-spacing: 0.06em; margin-bottom: 20px; }
+    .conf-note { font-size: 13px; color: rgba(21,17,13,0.45); line-height: 1.6; }
+    .back-home { display: inline-block; margin-top: 28px; padding: 12px 28px; background: var(--ink); color: var(--paper); border-radius: 10px; text-decoration: none; font-weight: 700; font-size: 14px; }
+
+    @media (max-width: 680px) {
+      .container { grid-template-columns: 1fr; padding: 20px 16px; }
+      .summary { position: static; }
+      .grid-2 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/" class="logo">hd</a>
+    <a href="/" class="back">← Back to shop</a>
+  </header>
+
+  <div id="checkout-wrap">
+    <div class="container">
+      <!-- Order Summary -->
+      <div class="summary">
+        <div class="summary-label">Your Order</div>
+        <div id="order-items"><div style="color:rgba(21,17,13,0.35);font-size:13px;padding:8px 0">Loading cart…</div></div>
+        <div class="total-row">
+          <span class="total-label">Total</span>
+          <span class="total-val" id="total-display">₹0</span>
+        </div>
+        <div class="ref-box">
+          <div class="ref-label">Order reference</div>
+          <div class="ref-val" id="ref-display">—</div>
+        </div>
+      </div>
+
+      <!-- Checkout Form -->
+      <div>
+        <!-- Delivery -->
+        <div class="card">
+          <div class="card-title">Delivery Details</div>
+          <div class="grid-2">
+            <div class="field"><label>Full Name *</label><input id="f-name" type="text" placeholder="Your name"></div>
+            <div class="field"><label>Phone *</label><input id="f-phone" type="tel" placeholder="10-digit number" maxlength="10"></div>
+          </div>
+          <div class="field"><label>Address *</label><textarea id="f-address" placeholder="Flat, building, street, area"></textarea></div>
+          <div class="grid-2">
+            <div class="field"><label>City *</label><input id="f-city" type="text" placeholder="City"></div>
+            <div class="field"><label>Pincode *</label><input id="f-pincode" type="text" placeholder="560001" maxlength="6"></div>
+          </div>
+        </div>
+
+        <!-- Payment -->
+        <div class="card">
+          <div class="card-title">Pay via UPI</div>
+
+          <div class="amount-reminder">
+            <span class="amount-reminder-text">Amount to pay</span>
+            <span class="amount-reminder-val" id="pay-amount">₹0</span>
+          </div>
+
+          <div class="pay-tabs">
+            <button class="pay-tab active" onclick="switchTab(this,'qr')">📷 Scan QR</button>
+            <button class="pay-tab" onclick="switchTab(this,'link')">📱 UPI App</button>
+            <button class="pay-tab" onclick="switchTab(this,'id')">📋 UPI ID</button>
+          </div>
+
+          <div class="pay-panel active" id="panel-qr">
+            <div class="qr-box">
+              <canvas id="qr-canvas"></canvas>
+              <div class="qr-hint">Scan with Google Pay, PhonePe, Paytm, BHIM or any UPI app</div>
+            </div>
+          </div>
+
+          <div class="pay-panel" id="panel-link">
+            <a id="upi-deep-link" href="#" class="upi-btn">Open UPI App →</a>
+            <div class="app-chips">
+              <span class="chip">Google Pay</span>
+              <span class="chip">PhonePe</span>
+              <span class="chip">Paytm</span>
+              <span class="chip">BHIM</span>
+              <span class="chip">Any UPI app</span>
+            </div>
+          </div>
+
+          <div class="pay-panel" id="panel-id">
+            <div class="upi-id-row">
+              <span class="upi-id-val" id="upi-id-display">Loading…</span>
+              <button class="copy-btn" onclick="copyId()">Copy</button>
+            </div>
+            <div class="qr-hint" style="font-size:12px;color:rgba(21,17,13,0.45)">Open any UPI app → Pay to UPI ID → paste the above</div>
+          </div>
+
+          <div class="payer-section">
+            <div class="payer-hint">Your UPI ID (optional — helps us match and verify your payment faster)</div>
+            <div class="field" style="margin:0"><input id="f-upi" type="text" placeholder="yourname@bank"></div>
+          </div>
+        </div>
+
+        <button class="submit-btn" id="submit-btn" onclick="placeOrder()">I've Paid — Place Order</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirmation -->
+  <div id="confirmation">
+    <div class="conf-icon">✅</div>
+    <div class="conf-title">Order Placed!</div>
+    <div class="conf-sub">We'll verify your UPI payment and confirm your order. Shriya will reach out on WhatsApp once verified.</div>
+    <div class="conf-id" id="conf-id"></div>
+    <div class="conf-note">Please save your order ID above. You may need it for any queries.</div>
+    <a href="/" class="back-home">← Back to Shop</a>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+  <script>
+    const ADMIN = 'https://admin.huedistrict.com';
+    let cart = [];
+    let total = 0;
+    let storeUpiId = '';
+    let storeUpiName = 'Hue District';
+    const orderId = genId();
+
+    function genId() {
+      const d = new Date();
+      const dt = d.toISOString().slice(0,10).replace(/-/g,'');
+      return 'HD-' + dt + '-' + String(Math.floor(1000 + Math.random()*9000));
+    }
+
+    function loadCart() {
+      try {
+        const s = sessionStorage.getItem('hd_cart');
+        if (s) {
+          const items = JSON.parse(s);
+          cart = items.map(function(it) {
+            return { name: it.name || it.id || 'Poster', size: it.size || '', qty: it.qty || 1, price: Number(it.price) || 0 };
+          });
+          total = cart.reduce(function(s,i){ return s + i.price * i.qty; }, 0);
+          return;
+        }
+      } catch(e) {}
+      const p = new URLSearchParams(location.search);
+      if (p.get('poster')) {
+        const price = Number(p.get('price')) || 0;
+        cart = [{ name: p.get('poster'), size: p.get('size')||'', qty: Number(p.get('qty'))||1, price }];
+        total = cart[0].price * cart[0].qty;
+      }
+    }
+
+    function renderSummary() {
+      document.getElementById('ref-display').textContent = orderId;
+      const el = document.getElementById('order-items');
+      if (!cart.length) {
+        el.innerHTML = '<div style="font-size:13px;color:rgba(21,17,13,0.4);padding:8px 0">No items. <a href="/">Go back to shop.</a></div>';
+        return;
+      }
+      el.innerHTML = cart.map(function(it) {
+        return '<div class="item"><div><div class="item-name">'+it.name+'</div><div class="item-meta">'+(it.size?'Size '+it.size:'')+(it.qty>1?' · Qty '+it.qty:'')+'</div></div><div class="item-price">₹'+(it.price*it.qty)+'</div></div>';
+      }).join('');
+      document.getElementById('total-display').textContent = '₹'+total;
+      document.getElementById('pay-amount').textContent = '₹'+total;
+    }
+
+    function buildUpiLink() {
+      if (!storeUpiId) return 'upi://pay?cu=INR';
+      var p = new URLSearchParams({ pa: storeUpiId, pn: storeUpiName, am: total, cu: 'INR', tn: orderId });
+      return 'upi://pay?' + p.toString();
+    }
+
+    function renderPayment() {
+      var link = buildUpiLink();
+      document.getElementById('upi-id-display').textContent = storeUpiId || 'Not configured — check Settings';
+      document.getElementById('upi-deep-link').href = link;
+      QRCode.toCanvas(document.getElementById('qr-canvas'), link, { width: 188, margin: 2, color: { dark: '#15110D', light: '#FBF6EB' } }, function(){});
+    }
+
+    async function fetchConfig() {
+      try {
+        var r = await fetch(ADMIN + '/api/public-config');
+        if (r.ok) { var c = await r.json(); storeUpiId = c.upiId || ''; storeUpiName = c.upiName || 'Hue District'; }
+      } catch(e) {}
+      renderPayment();
+    }
+
+    function switchTab(btn, panel) {
+      document.querySelectorAll('.pay-tab').forEach(function(t){ t.classList.remove('active'); });
+      document.querySelectorAll('.pay-panel').forEach(function(p){ p.classList.remove('active'); });
+      btn.classList.add('active');
+      document.getElementById('panel-'+panel).classList.add('active');
+    }
+
+    function copyId() {
+      navigator.clipboard.writeText(storeUpiId).then(function(){
+        var b = document.querySelector('.copy-btn');
+        b.textContent = 'Copied!';
+        setTimeout(function(){ b.textContent = 'Copy'; }, 2000);
+      });
+    }
+
+    function validate() {
+      var fields = ['f-name','f-phone','f-address','f-city','f-pincode'];
+      var ok = true;
+      fields.forEach(function(id){
+        var el = document.getElementById(id);
+        if (!el.value.trim()) { el.classList.add('err'); ok = false; } else { el.classList.remove('err'); }
+      });
+      var phone = document.getElementById('f-phone').value.trim();
+      if (phone && !/^\d{10}$/.test(phone)) { document.getElementById('f-phone').classList.add('err'); ok = false; }
+      var pin = document.getElementById('f-pincode').value.trim();
+      if (pin && !/^\d{6}$/.test(pin)) { document.getElementById('f-pincode').classList.add('err'); ok = false; }
+      if (!ok) { document.querySelector('.err').scrollIntoView({ behavior:'smooth', block:'center' }); }
+      return ok;
+    }
+
+    async function placeOrder() {
+      if (!validate()) return;
+      if (!cart.length || total === 0) { alert('Your cart is empty.'); return; }
+      var btn = document.getElementById('submit-btn');
+      btn.disabled = true; btn.textContent = 'Placing order…';
+      var payload = {
+        id: orderId,
+        customer: {
+          name: document.getElementById('f-name').value.trim(),
+          phone: document.getElementById('f-phone').value.trim(),
+          address: document.getElementById('f-address').value.trim(),
+          city: document.getElementById('f-city').value.trim(),
+          pincode: document.getElementById('f-pincode').value.trim(),
+        },
+        items: cart, total: total,
+        payerUpi: document.getElementById('f-upi').value.trim(),
+        createdAt: new Date().toISOString()
+      };
+      try {
+        var r = await fetch(ADMIN + '/api/orders', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+        if (r.ok) {
+          sessionStorage.removeItem('hd_cart');
+          document.getElementById('checkout-wrap').style.display = 'none';
+          document.getElementById('confirmation').style.display = 'block';
+          document.getElementById('conf-id').textContent = orderId;
+        } else {
+          alert('Something went wrong: ' + await r.text());
+          btn.disabled = false; btn.textContent = "I've Paid — Place Order";
+        }
+      } catch(e) {
+        alert('Network error. Please try again.');
+        btn.disabled = false; btn.textContent = "I've Paid — Place Order";
+      }
+    }
+
+    loadCart();
+    renderSummary();
+    fetchConfig();
+  </script>
+</body>
+</html>

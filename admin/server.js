@@ -8,6 +8,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const ROOT_FOLDER_ID = '1018xTizZybeAjs-9wlgWzJWx7mSL0k5t';
 const REVIEW_FOLDER_NAME = 'Posters for Review';
 const SALE_FOLDER_NAME = 'Posters for Sale';
+const ORDERS_FOLDER_NAME = '_hd_orders';
 
 const ALLOWED_EMAILS = new Set([
   'shriyaranjit28@gmail.com',
@@ -72,6 +73,27 @@ function getDriveClient(user) {
 
 const folderCache = {};
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+function getServiceDriveClient() {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY) return null;
+  try {
+    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    const auth = new google.auth.GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/drive'] });
+    return google.drive({ version: 'v3', auth });
+  } catch (e) { return null; }
+}
+
+function setCors(res) {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+}
+
+function statusBadge(status) {
+  const map = { pending: ['#fef3c7','#92400e','Pending Payment'], paid: ['#d1fae5','#065f46','Paid'], dispatched: ['#dbeafe','#1e40af','Dispatched'], cancelled: ['#fee2e2','#991b1b','Cancelled'] };
+  const [bg, color, label] = map[status] || ['#f3f4f6','#374151', status];
+  return `<span style="background:${bg};color:${color};font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;white-space:nowrap">${label}</span>`;
+}
 
 async function findFolder(drive, parentId, name) {
   const key = `${parentId}:${name}`;
@@ -443,10 +465,13 @@ const toastScript = `
 `;
 
 function layout(title, user, body, extraScript = '') {
+  const topLevel = ['Posters', 'Orders', 'Pricing', 'Settings'];
   const nav = [
     { href: '/', label: 'Posters' },
+    { href: '/orders', label: 'Orders' },
     { href: '/pricing', label: 'Pricing' },
-  ].map(l => `<a href="${l.href}" class="nav-link${title === l.label || (l.href === '/' && title !== 'Pricing') ? ' active' : ''}">${l.label}</a>`).join('');
+    { href: '/settings', label: 'Settings' },
+  ].map(l => `<a href="${l.href}" class="nav-link${title === l.label || (l.href === '/' && !topLevel.includes(title)) ? ' active' : ''}">${l.label}</a>`).join('');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -986,6 +1011,203 @@ app.post('/api/pricing/save', requireAuth, async (req, res) => {
     res.sendStatus(200);
   } catch (err) {
     res.status(500).send(err.message);
+  }
+});
+
+// ── Public endpoints (customer-facing, CORS) ─────────────
+
+app.options('/api/public-config', (req, res) => { setCors(res); res.sendStatus(200); });
+app.get('/api/public-config', async (req, res) => {
+  setCors(res);
+  try {
+    const drive = getServiceDriveClient();
+    const config = drive ? (await readDriveJson(drive, ROOT_FOLDER_ID, '_hd_config.json') || {}) : {};
+    res.json({ upiId: config.upiId || process.env.UPI_ID || '', upiName: config.upiName || 'Hue District' });
+  } catch (e) {
+    res.json({ upiId: process.env.UPI_ID || '', upiName: 'Hue District' });
+  }
+});
+
+app.options('/api/orders', (req, res) => { setCors(res); res.sendStatus(200); });
+app.post('/api/orders', async (req, res) => {
+  setCors(res);
+  try {
+    const order = req.body;
+    if (!order.id || !order.customer || !Array.isArray(order.items)) return res.status(400).send('Invalid order');
+    const drive = getServiceDriveClient();
+    if (!drive) return res.status(503).send('Order service not configured — set GOOGLE_SERVICE_ACCOUNT_KEY');
+    const folderId = await getOrCreateSubfolder(drive, ROOT_FOLDER_ID, ORDERS_FOLDER_NAME);
+    await writeDriveJson(drive, folderId, `${order.id}.json`, { ...order, status: 'pending', paidAt: null, dispatchedAt: null });
+    res.json({ ok: true, orderId: order.id });
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
+});
+
+// ── Orders management ─────────────────────────────────────
+
+app.get('/orders', requireAuth, async (req, res) => {
+  try {
+    const drive = getDriveClient(req.user);
+    const folderId = await getOrCreateSubfolder(drive, ROOT_FOLDER_ID, ORDERS_FOLDER_NAME);
+    const files = (await listFiles(drive, folderId)).filter(f => f.name.endsWith('.json'));
+
+    const orders = (await Promise.all(files.map(async f => {
+      try { return await readMetaFromDrive(drive, f.id); } catch { return null; }
+    }))).filter(Boolean).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    const filter = req.query.status || 'all';
+    const filtered = filter === 'all' ? orders : orders.filter(o => o.status === filter);
+
+    const counts = { all: orders.length, pending: 0, paid: 0, dispatched: 0, cancelled: 0 };
+    orders.forEach(o => { if (counts[o.status] !== undefined) counts[o.status]++; });
+
+    const tabs = ['all', 'pending', 'paid', 'dispatched', 'cancelled'].map(s =>
+      `<a href="/orders?status=${s}" class="nav-link${filter === s ? ' active' : ''}" style="font-size:13px">${s.charAt(0).toUpperCase()+s.slice(1)} (${counts[s]})</a>`
+    ).join('');
+
+    const rows = filtered.length ? filtered.map(o => {
+      const date = new Date(o.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+      const items = o.items.map(i => `${i.name}${i.size ? ' · '+i.size : ''} ×${i.qty||1}`).join(', ');
+      const actions = o.status === 'pending'
+        ? `<button class="btn btn-green" style="font-size:12px;padding:5px 12px" onclick="updateStatus('${esc(o.id)}','paid')">Mark Paid</button>`
+        : o.status === 'paid'
+        ? `<button class="btn btn-green" style="font-size:12px;padding:5px 12px" onclick="updateStatus('${esc(o.id)}','dispatched')">Mark Dispatched</button>`
+        : '';
+      const cancel = o.status !== 'dispatched' && o.status !== 'cancelled'
+        ? `<button class="btn btn-red" style="font-size:11px;padding:4px 10px;margin-left:6px" onclick="updateStatus('${esc(o.id)}','cancelled')">Cancel</button>` : '';
+      return `<tr onclick="toggleDetail('${esc(o.id)}')" style="cursor:pointer">
+        <td style="font-family:monospace;font-size:12px;white-space:nowrap">${esc(o.id)}</td>
+        <td style="white-space:nowrap;font-size:13px">${date}</td>
+        <td><div style="font-size:13px;font-weight:500">${esc(o.customer?.name||'')}</div><div style="font-size:12px;color:#6b7280">${esc(o.customer?.phone||'')}</div></td>
+        <td style="font-size:13px;max-width:200px">${esc(items)}</td>
+        <td style="font-weight:600;white-space:nowrap">₹${o.total||0}</td>
+        <td>${statusBadge(o.status)}</td>
+        <td onclick="event.stopPropagation()" style="white-space:nowrap">${actions}${cancel}</td>
+      </tr>
+      <tr id="detail-${esc(o.id)}" style="display:none;background:#f9fafb">
+        <td colspan="7" style="padding:16px 20px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;font-size:13px">
+            <div><div style="font-size:11px;color:#9ca3af;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Delivery Address</div>${esc(o.customer?.address||'')}${o.customer?.city ? ', '+esc(o.customer.city) : ''}${o.customer?.pincode ? ' — '+esc(o.customer.pincode) : ''}</div>
+            ${o.payerUpi ? `<div><div style="font-size:11px;color:#9ca3af;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Customer UPI ID</div><span style="font-family:monospace">${esc(o.payerUpi)}</span></div>` : ''}
+            ${o.paidAt ? `<div><div style="font-size:11px;color:#9ca3af;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Paid At</div>${new Date(o.paidAt).toLocaleString('en-IN')}</div>` : ''}
+            ${o.dispatchedAt ? `<div><div style="font-size:11px;color:#9ca3af;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Dispatched At</div>${new Date(o.dispatchedAt).toLocaleString('en-IN')}</div>` : ''}
+          </div>
+        </td>
+      </tr>`;
+    }).join('') : `<tr><td colspan="7" style="text-align:center;padding:48px;color:#9ca3af">No orders${filter !== 'all' ? ' with status "'+filter+'"' : ''}</td></tr>`;
+
+    res.send(layout('Orders', req.user, `
+      <div class="page-hdr"><h1>Orders</h1></div>
+      <div style="display:flex;gap:16px;margin-bottom:20px;flex-wrap:wrap">${tabs}</div>
+      <div class="section-card" style="padding:0;overflow:hidden">
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead><tr style="background:#f9fafb;border-bottom:1px solid #e5e7eb">
+              <th style="text-align:left;padding:10px 16px;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap">Order ID</th>
+              <th style="text-align:left;padding:10px 16px;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:.05em">Date</th>
+              <th style="text-align:left;padding:10px 16px;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:.05em">Customer</th>
+              <th style="text-align:left;padding:10px 16px;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:.05em">Items</th>
+              <th style="text-align:left;padding:10px 16px;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:.05em">Total</th>
+              <th style="text-align:left;padding:10px 16px;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:.05em">Status</th>
+              <th style="padding:10px 16px"></th>
+            </tr></thead>
+            <tbody id="orders-body">${rows}</tbody>
+          </table>
+        </div>
+      </div>
+    `, `
+      function toggleDetail(id) {
+        var el = document.getElementById('detail-' + id);
+        if (el) el.style.display = el.style.display === 'none' ? '' : 'none';
+      }
+      async function updateStatus(id, status) {
+        if (!confirm('Mark order ' + id + ' as ' + status + '?')) return;
+        var r = await fetch('/api/orders/' + id + '/status', {
+          method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ status })
+        });
+        if (r.ok) { window.location.reload(); }
+        else { showToast('Error: ' + await r.text()); }
+      }
+    `));
+  } catch (e) {
+    res.status(500).send(`<pre>Error: ${esc(e.message)}</pre>`);
+  }
+});
+
+app.post('/api/orders/:id/status', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    if (!['paid', 'dispatched', 'cancelled'].includes(status)) return res.status(400).send('Invalid status');
+
+    const drive = getDriveClient(req.user);
+    const folderId = await getOrCreateSubfolder(drive, ROOT_FOLDER_ID, ORDERS_FOLDER_NAME);
+    const found = await drive.files.list({
+      q: `'${folderId}' in parents and name = '${id}.json' and trashed = false`,
+      fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true,
+    });
+    if (!found.data.files.length) return res.status(404).send('Order not found');
+
+    const order = await readMetaFromDrive(drive, found.data.files[0].id);
+    await writeDriveJson(drive, folderId, `${id}.json`, {
+      ...order, status,
+      paidAt: status === 'paid' ? new Date().toISOString() : order.paidAt,
+      dispatchedAt: status === 'dispatched' ? new Date().toISOString() : order.dispatchedAt,
+    });
+    res.sendStatus(200);
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
+});
+
+// ── Settings ──────────────────────────────────────────────
+
+app.get('/settings', requireAuth, async (req, res) => {
+  try {
+    const drive = getDriveClient(req.user);
+    const config = await readDriveJson(drive, ROOT_FOLDER_ID, '_hd_config.json') || {};
+    res.send(layout('Settings', req.user, `
+      <div class="page-hdr"><h1>Settings</h1></div>
+      <div class="section-card" style="max-width:480px">
+        <div class="section-title">UPI Payment Details</div>
+        <p class="section-hint">These appear on the customer checkout page.</p>
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div>
+            <div class="meta-label" style="margin-bottom:5px">UPI ID</div>
+            <input class="meta-input" id="upi-id" value="${esc(config.upiId||'')}" placeholder="yourname@okicici" style="width:100%">
+          </div>
+          <div>
+            <div class="meta-label" style="margin-bottom:5px">Display Name</div>
+            <input class="meta-input" id="upi-name" value="${esc(config.upiName||'Hue District')}" placeholder="Hue District" style="width:100%">
+          </div>
+          <div>
+            <button class="btn btn-green" style="width:auto;padding:9px 24px;border-radius:8px" onclick="saveSettings()">Save</button>
+          </div>
+        </div>
+      </div>
+    `, `
+      async function saveSettings() {
+        const r = await fetch('/api/settings/save', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ upiId: document.getElementById('upi-id').value.trim(), upiName: document.getElementById('upi-name').value.trim() })
+        });
+        if (r.ok) { showToast('Settings saved ✓'); } else { showToast('Error: ' + await r.text()); }
+      }
+    `));
+  } catch (e) {
+    res.status(500).send(`<pre>Error: ${esc(e.message)}</pre>`);
+  }
+});
+
+app.post('/api/settings/save', requireAuth, async (req, res) => {
+  try {
+    const { upiId, upiName } = req.body;
+    const drive = getDriveClient(req.user);
+    await writeDriveJson(drive, ROOT_FOLDER_ID, '_hd_config.json', { upiId, upiName, updatedAt: new Date().toISOString() });
+    res.sendStatus(200);
+  } catch (e) {
+    res.status(500).send(e.message);
   }
 });
 
