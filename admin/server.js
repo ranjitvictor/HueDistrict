@@ -873,9 +873,9 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
                   <div class="status-actions">
                     ${isListed
                       ? `<div class="btn btn-listed">✓ Listed for Sale</div>
-                         <button class="btn btn-red" onclick="unlist(this,'${esc(folderName)}','${esc(p.ig?.name||'')}','${esc(p.web?.name||'')}','${p.ig?.id||''}','${p.web?.id||''}')">Unlist</button>`
+                         <button class="btn btn-red" onclick="unlist(this,'${esc(folderName)}','${esc(p.ig?.name||'')}','${esc(p.web?.name||'')}','${p.ig?.id||''}','${p.web?.id||''}','${esc(p.name)}')">Unlist</button>`
                       : canApprove
-                        ? `<button class="btn btn-green" onclick="approve(this,'${esc(folderName)}','${p.ig.id}','${p.web.id}','${esc(p.ig.name)}','${esc(p.web.name)}')">Ready for Sale</button>`
+                        ? `<button class="btn btn-green" onclick="approve(this,'${esc(folderName)}','${p.ig.id}','${p.web.id}','${esc(p.ig.name)}','${esc(p.web.name)}','${esc(p.name)}')">Ready for Sale</button>`
                         : `<div class="badge-missing">Missing _ig or _web version</div>`}
                   </div>
                   ${p.web
@@ -955,19 +955,19 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
         }
       }
 
-      async function approve(btn, folderName, igId, webId, igName, webName) {
+      async function approve(btn, folderName, igId, webId, igName, webName, baseName) {
         btn.disabled = true;
         btn.textContent = 'Processing…';
         try {
           const r = await fetch('/api/approve', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ folderName, igId, webId }),
+            body: JSON.stringify({ folderName, igId, webId, srcFolderId: _folderId, baseName }),
           });
           if (r.ok) {
             btn.closest('.status-actions').innerHTML =
               '<div class="btn btn-listed">✓ Listed for Sale</div>' +
-              '<button class="btn btn-red" onclick="unlist(this,\\'' + folderName + '\\',\\'' + igName + '\\',\\'' + webName + '\\',\\'' + igId + '\\',\\'' + webId + '\\')">Unlist</button>';
+              '<button class="btn btn-red" onclick="unlist(this,\\'' + folderName + '\\',\\'' + igName + '\\',\\'' + webName + '\\',\\'' + igId + '\\',\\'' + webId + '\\',\\'' + baseName + '\\')">Unlist</button>';
             showToast('Added to Posters for Sale ✓');
           } else {
             btn.disabled = false;
@@ -981,7 +981,7 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
         }
       }
 
-      async function unlist(btn, folderName, igName, webName, igId, webId) {
+      async function unlist(btn, folderName, igName, webName, igId, webId, baseName) {
         if (!confirm('Remove this poster from sale? The copies in Posters for Sale will be deleted.')) return;
         btn.disabled = true;
         btn.textContent = 'Removing…';
@@ -989,11 +989,11 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
           const r = await fetch('/api/unlist', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ folderName, igName, webName }),
+            body: JSON.stringify({ folderName, igName, webName, baseName }),
           });
           if (r.ok) {
             btn.closest('.status-actions').innerHTML =
-              '<button class="btn btn-green" onclick="approve(this,\\'' + folderName + '\\',\\'' + igId + '\\',\\'' + webId + '\\',\\'' + igName + '\\',\\'' + webName + '\\')">Ready for Sale</button>';
+              '<button class="btn btn-green" onclick="approve(this,\\'' + folderName + '\\',\\'' + igId + '\\',\\'' + webId + '\\',\\'' + igName + '\\',\\'' + webName + '\\',\\'' + baseName + '\\')">Ready for Sale</button>';
             showToast('Removed from Posters for Sale');
           } else {
             btn.disabled = false;
@@ -1060,7 +1060,7 @@ app.get('/api/download/:fileId', requireAuth, async (req, res) => {
 // Copy _ig.png + _web.png to Posters for Sale
 app.post('/api/approve', requireAuth, async (req, res) => {
   try {
-    const { folderName, igId, webId } = req.body;
+    const { folderName, igId, webId, srcFolderId, baseName } = req.body;
     if (!folderName || !igId || !webId) return res.status(400).send('Missing fields');
 
     const drive = getDriveClient(req.user);
@@ -1071,6 +1071,18 @@ app.post('/api/approve', requireAuth, async (req, res) => {
       drive.files.copy({ fileId: igId, requestBody: { parents: [destId] }, supportsAllDrives: true }),
       drive.files.copy({ fileId: webId, requestBody: { parents: [destId] }, supportsAllDrives: true }),
     ]);
+
+    // Also copy the room mockup if one exists in the source folder
+    if (srcFolderId && baseName) {
+      const roomName = `${baseName}_room.png`;
+      const roomFiles = await drive.files.list({
+        q: `'${srcFolderId}' in parents and name = '${roomName.replace(/'/g, "\\'")}' and trashed = false`,
+        fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true,
+      });
+      if (roomFiles.data.files.length) {
+        await drive.files.copy({ fileId: roomFiles.data.files[0].id, requestBody: { parents: [destId] }, supportsAllDrives: true });
+      }
+    }
 
     res.sendStatus(200);
   } catch (err) {
@@ -1149,7 +1161,7 @@ app.post('/api/save-meta', requireAuth, async (req, res) => {
 // Delete _ig + _web copies from Posters for Sale
 app.post('/api/unlist', requireAuth, async (req, res) => {
   try {
-    const { folderName, igName, webName } = req.body;
+    const { folderName, igName, webName, baseName } = req.body;
     if (!folderName || !igName || !webName) return res.status(400).send('Missing fields');
 
     const drive = getDriveClient(req.user);
@@ -1164,8 +1176,11 @@ app.post('/api/unlist', requireAuth, async (req, res) => {
     if (!subRes.data.files.length) return res.status(404).send('Sale subfolder not found');
 
     const saleSubId = subRes.data.files[0].id;
+    const names = [igName, webName];
+    if (baseName) names.push(`${baseName}_room.png`);
+    const nameClause = names.map(n => `name = '${n.replace(/'/g, "\\'")}'`).join(' or ');
     const filesRes = await drive.files.list({
-      q: `'${saleSubId}' in parents and (name = '${igName}' or name = '${webName}') and trashed = false`,
+      q: `'${saleSubId}' in parents and (${nameClause}) and trashed = false`,
       fields: 'files(id)',
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
