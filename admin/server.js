@@ -401,7 +401,7 @@ async function detectFrame(mockupBuffer) {
   const isWhite = new Uint8Array(W * H);
   for (let i = 0; i < W * H; i++) {
     const r = data[i * ch], g = data[i * ch + 1], b = data[i * ch + 2];
-    if (r > 222 && g > 222 && b > 222 && (Math.max(r, g, b) - Math.min(r, g, b)) < 20) isWhite[i] = 1;
+    if (r > 214 && g > 214 && b > 214 && (Math.max(r, g, b) - Math.min(r, g, b)) < 26) isWhite[i] = 1;
   }
 
   // Flood-fill connected components (4-connectivity)
@@ -430,9 +430,9 @@ async function detectFrame(mockupBuffer) {
     comps.push({ minx, miny, bw, bh, area, fill: area / (bw * bh), touchEdge });
   }
 
-  const minArea = W * H * 0.01;
+  const minArea = W * H * 0.008;
   const cand = comps.filter(c =>
-    !c.touchEdge && c.fill > 0.78 && c.area > minArea &&
+    !c.touchEdge && c.fill > 0.72 && c.area > minArea &&
     c.bw > W * 0.04 && c.bh > H * 0.04 &&
     (c.bw / c.bh) > 0.2 && (c.bw / c.bh) < 5
   ).sort((a, b) => b.area - a.area);
@@ -449,13 +449,53 @@ async function detectFrame(mockupBuffer) {
   };
 }
 
+// Fallback: ask Claude vision to locate the empty frame opening.
+// Used for photographic / AI-generated mockups where the interior isn't flat white.
+async function detectFrameWithClaude(mockupBuffer) {
+  const meta = await sharp(mockupBuffer).metadata();
+  const resized = await sharp(mockupBuffer).resize(1024, null, { fit: 'inside' }).jpeg({ quality: 85 }).toBuffer();
+  const msg = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 300,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: resized.toString('base64') } },
+        { type: 'text', text: 'This room photo contains one empty picture frame. Give the bounding box of the EMPTY OPENING INSIDE the frame — the blank area where artwork goes, just inside the frame molding (not including the molding itself). Express it as fractions of the image dimensions, each between 0 and 1. Reply with ONLY compact JSON and nothing else: {"x":<left>,"y":<top>,"w":<width>,"h":<height>}' },
+      ],
+    }],
+  });
+  let txt = msg.content[0].text.trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  const box = JSON.parse(txt);
+  if (typeof box.x !== 'number' || typeof box.w !== 'number' || box.w <= 0 || box.h <= 0) return null;
+  return {
+    x: Math.round(box.x * meta.width),
+    y: Math.round(box.y * meta.height),
+    w: Math.round(box.w * meta.width),
+    h: Math.round(box.h * meta.height),
+  };
+}
+
+// Clamp a frame rect to stay within the image bounds.
+function clampFrame(frame, width, height) {
+  const x = Math.max(0, Math.min(frame.x, width - 1));
+  const y = Math.max(0, Math.min(frame.y, height - 1));
+  return {
+    x, y,
+    w: Math.max(1, Math.min(frame.w, width - x)),
+    h: Math.max(1, Math.min(frame.h, height - y)),
+  };
+}
+
 // Place poster inside the frame, preserving aspect ratio (white padding).
 async function composeMockup(mockupBuffer, posterBuffer, frame) {
+  const meta = await sharp(mockupBuffer).metadata();
+  const f = clampFrame(frame, meta.width, meta.height);
   const poster = await sharp(posterBuffer)
-    .resize(frame.w, frame.h, { fit: 'contain', background: { r: 255, g: 255, b: 255 } })
+    .resize(f.w, f.h, { fit: 'contain', background: { r: 255, g: 255, b: 255 } })
     .toBuffer();
   return sharp(mockupBuffer)
-    .composite([{ input: poster, left: frame.x, top: frame.y }])
+    .composite([{ input: poster, left: f.x, top: f.y }])
     .png()
     .toBuffer();
 }
@@ -1219,7 +1259,11 @@ app.post('/api/mockup', requireAuth, async (req, res) => {
       fetchDriveBuffer(drive, webFileId),
     ]);
 
-    const frame = await detectFrame(mockupBuf);
+    // Fast pixel heuristic first; fall back to Claude vision for photographic mockups.
+    let frame = await detectFrame(mockupBuf);
+    if (!frame) {
+      try { frame = await detectFrameWithClaude(mockupBuf); } catch (e) { /* fall through */ }
+    }
     if (!frame) return res.status(422).send(`No empty frame detected in "${mockup.name}". Try another room.`);
 
     const out = await composeMockup(mockupBuf, posterBuf, frame);
