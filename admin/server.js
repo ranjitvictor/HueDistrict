@@ -162,6 +162,8 @@ function groupPosters(files) {
 
     if (/_ig\.(png|jpg|jpeg)$/i.test(name)) {
       base = name.replace(/_ig\.(png|jpg|jpeg)$/i, ''); type = 'ig';
+    } else if (/_room\.(png|jpg|jpeg)$/i.test(name)) {
+      base = name.replace(/_room\.(png|jpg|jpeg)$/i, ''); type = 'room';
     } else if (/_web\.(png|jpg|jpeg)$/i.test(name)) {
       base = name.replace(/_web\.(png|jpg|jpeg)$/i, ''); type = 'web';
     } else if (/_meta\.json$/i.test(name)) {
@@ -523,6 +525,21 @@ function esc(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// Drop name helpers — folder names carry a theme + a date, e.g. "Mad for Manga 22-June-2026"
+function parseDropDate(name) {
+  const m = name.match(/(\d{1,2})[-\s]([A-Za-z]+)[-\s](\d{4})/);
+  if (!m) return null;
+  const d = new Date(`${m[2]} ${m[1]}, ${m[3]}`);
+  return isNaN(d.getTime()) ? null : d;
+}
+function stripDropDate(name) {
+  return name.replace(/\s*\d{1,2}[-\s][A-Za-z]+[-\s]\d{4}\s*/g, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+function sizePrice(size, categories) {
+  const total = categories.reduce((s, c) => s + (Number(size.costs[c]) || 0), 0);
+  return Math.round(total * (1 + (Number(size.markup) || 0) / 100));
 }
 
 const css = `
@@ -1380,6 +1397,81 @@ app.get('/api/public-config', async (req, res) => {
     res.json({ upiId: config.upiId || process.env.UPI_ID || '', upiName: config.upiName || 'Hue District' });
   } catch (e) {
     res.json({ upiId: process.env.UPI_ID || '', upiName: 'Hue District' });
+  }
+});
+
+// Public drops feed for the customer site.
+// A drop = subfolder of "Posters for Review". It's LIVE if its matching
+// "Posters for Sale" subfolder has posters; otherwise it's UPCOMING (show date, no images).
+app.options('/api/public-drops', (req, res) => { setCors(res); res.sendStatus(200); });
+app.get('/api/public-drops', async (req, res) => {
+  setCors(res);
+  try {
+    const drive = getServiceDriveClient();
+    if (!drive) return res.status(503).json({ error: 'not configured' });
+
+    const reviewId = await findFolder(drive, ROOT_FOLDER_ID, REVIEW_FOLDER_NAME);
+    const reviewFolders = await listSubfolders(drive, reviewId);
+
+    let saleId = null;
+    try { saleId = await findFolder(drive, ROOT_FOLDER_ID, SALE_FOLDER_NAME); } catch {}
+    const saleByName = {};
+    if (saleId) (await listSubfolders(drive, saleId)).forEach(f => { saleByName[f.name] = f.id; });
+
+    const pricing = await readDriveJson(drive, ROOT_FOLDER_ID, '_hd_pricing.json');
+    const sizes = pricing && Array.isArray(pricing.sizes)
+      ? pricing.sizes.map(s => ({ name: s.name, price: sizePrice(s, pricing.categories || []) }))
+      : [];
+    const base = process.env.BASE_URL || '';
+
+    const drops = await Promise.all(reviewFolders.map(async (f) => {
+      const date = parseDropDate(f.name);
+      let posters = [];
+      const saleFolderId = saleByName[f.name];
+      if (saleFolderId) {
+        const grouped = groupPosters(await listFiles(drive, saleFolderId)).filter(p => p.web);
+        posters = grouped.map(p => ({
+          name: p.name,
+          images: [
+            { type: 'web', url: `${base}/api/public-img/${p.web.id}` },
+            ...(p.room ? [{ type: 'room', url: `${base}/api/public-img/${p.room.id}` }] : []),
+          ],
+        }));
+      }
+      return {
+        theme: stripDropDate(f.name) || f.name,
+        live: posters.length > 0,
+        expected: date ? date.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }) : null,
+        _time: date ? date.getTime() : Infinity,
+        posters,
+      };
+    }));
+
+    drops.sort((a, b) => a._time - b._time);
+    drops.forEach(d => delete d._time);
+    res.json({ drops, sizes });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Public image proxy (serves product images from Drive via the service account)
+app.options('/api/public-img/:fileId', (req, res) => { setCors(res); res.sendStatus(200); });
+app.get('/api/public-img/:fileId', async (req, res) => {
+  setCors(res);
+  try {
+    const drive = getServiceDriveClient();
+    if (!drive) return res.status(503).send('not configured');
+    const meta = await drive.files.get({ fileId: req.params.fileId, fields: 'mimeType', supportsAllDrives: true });
+    const resp = await drive.files.get(
+      { fileId: req.params.fileId, alt: 'media', supportsAllDrives: true },
+      { responseType: 'stream' }
+    );
+    res.set('Content-Type', meta.data.mimeType || 'image/png');
+    res.set('Cache-Control', 'public, max-age=3600');
+    resp.data.pipe(res);
+  } catch (e) {
+    res.status(404).send('not found');
   }
 });
 
