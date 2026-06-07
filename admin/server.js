@@ -22,7 +22,7 @@ const ALLOWED_EMAILS = new Set([
 
 const app = express();
 app.set('trust proxy', 1);
-app.use(express.json());
+app.use(express.json({ limit: '8mb' }));
 
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/preview')) {
@@ -1394,7 +1394,12 @@ app.get('/api/public-config', async (req, res) => {
   try {
     const drive = getServiceDriveClient();
     const config = drive ? (await readDriveJson(drive, ROOT_FOLDER_ID, '_hd_config.json') || {}) : {};
-    res.json({ upiId: config.upiId || process.env.UPI_ID || '', upiName: config.upiName || 'Hue District' });
+    const base = process.env.BASE_URL || '';
+    res.json({
+      upiId: config.upiId || process.env.UPI_ID || '',
+      upiName: config.upiName || 'Hue District',
+      qrUrl: config.qrFileId ? `${base}/api/public-img/${config.qrFileId}` : null,
+    });
   } catch (e) {
     res.json({ upiId: process.env.UPI_ID || '', upiName: 'Hue District' });
   }
@@ -1614,6 +1619,7 @@ app.get('/settings', requireAuth, async (req, res) => {
   try {
     const drive = getDriveClient(req.user);
     const config = await readDriveJson(drive, ROOT_FOLDER_ID, '_hd_config.json') || {};
+    const qrSrc = config.qrFileId ? `/api/public-img/${config.qrFileId}` : '';
     res.send(layout('Settings', req.user, `
       <div class="page-hdr"><h1>Settings</h1></div>
       <div class="section-card" style="max-width:480px">
@@ -1633,6 +1639,22 @@ app.get('/settings', requireAuth, async (req, res) => {
           </div>
         </div>
       </div>
+
+      <div class="section-card" style="max-width:480px">
+        <div class="section-title">Payment QR Code</div>
+        <p class="section-hint">Upload your UPI QR (e.g. a merchant QR from Paytm for Business). When set, the checkout page shows this image instead of an auto-generated QR.</p>
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div id="qr-preview-wrap" style="display:${qrSrc ? 'block' : 'none'}">
+            <img id="qr-preview" src="${qrSrc}" alt="Payment QR" style="width:200px;height:200px;object-fit:contain;border:1px solid #e5e7eb;border-radius:10px;background:#fff;padding:8px">
+          </div>
+          <div id="qr-empty" style="display:${qrSrc ? 'none' : 'block'};color:#9ca3af;font-size:13px">No QR uploaded yet.</div>
+          <input type="file" id="qr-file" accept="image/png,image/jpeg" style="font-size:13px">
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-green" style="width:auto;padding:9px 24px;border-radius:8px" onclick="uploadQr()">Upload QR</button>
+            <button class="btn btn-red" id="qr-remove-btn" style="width:auto;padding:9px 18px;border-radius:8px;display:${qrSrc ? 'inline-block' : 'none'}" onclick="removeQr()">Remove</button>
+          </div>
+        </div>
+      </div>
     `, `
       async function saveSettings() {
         const r = await fetch('/api/settings/save', {
@@ -1640,6 +1662,34 @@ app.get('/settings', requireAuth, async (req, res) => {
           body: JSON.stringify({ upiId: document.getElementById('upi-id').value.trim(), upiName: document.getElementById('upi-name').value.trim() })
         });
         if (r.ok) { showToast('Settings saved ✓'); } else { showToast('Error: ' + await r.text()); }
+      }
+      async function uploadQr() {
+        const f = document.getElementById('qr-file').files[0];
+        if (!f) { showToast('Choose an image first'); return; }
+        if (f.size > 7 * 1024 * 1024) { showToast('Image too large (max 7MB)'); return; }
+        const dataUrl = await new Promise((res2) => { const fr = new FileReader(); fr.onload = () => res2(fr.result); fr.readAsDataURL(f); });
+        const r = await fetch('/api/settings/qr', {
+          method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ dataUrl })
+        });
+        if (r.ok) {
+          const d = await r.json();
+          const img = document.getElementById('qr-preview');
+          img.src = '/api/public-img/' + d.qrFileId + '?t=' + Date.now();
+          document.getElementById('qr-preview-wrap').style.display = 'block';
+          document.getElementById('qr-empty').style.display = 'none';
+          document.getElementById('qr-remove-btn').style.display = 'inline-block';
+          showToast('QR uploaded ✓');
+        } else { showToast('Error: ' + await r.text()); }
+      }
+      async function removeQr() {
+        if (!confirm('Remove the uploaded QR? Checkout will fall back to the auto-generated QR.')) return;
+        const r = await fetch('/api/settings/qr', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ remove: true }) });
+        if (r.ok) {
+          document.getElementById('qr-preview-wrap').style.display = 'none';
+          document.getElementById('qr-empty').style.display = 'block';
+          document.getElementById('qr-remove-btn').style.display = 'none';
+          showToast('QR removed');
+        } else { showToast('Error: ' + await r.text()); }
       }
     `));
   } catch (e) {
@@ -1651,8 +1701,42 @@ app.post('/api/settings/save', requireAuth, async (req, res) => {
   try {
     const { upiId, upiName } = req.body;
     const drive = getDriveClient(req.user);
-    await writeDriveJson(drive, ROOT_FOLDER_ID, '_hd_config.json', { upiId, upiName, updatedAt: new Date().toISOString() });
+    const config = await readDriveJson(drive, ROOT_FOLDER_ID, '_hd_config.json') || {};
+    await writeDriveJson(drive, ROOT_FOLDER_ID, '_hd_config.json', { ...config, upiId, upiName, updatedAt: new Date().toISOString() });
     res.sendStatus(200);
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
+});
+
+// Upload or remove the payment QR image
+app.post('/api/settings/qr', requireAuth, async (req, res) => {
+  try {
+    const drive = getDriveClient(req.user);
+    const config = await readDriveJson(drive, ROOT_FOLDER_ID, '_hd_config.json') || {};
+
+    if (req.body.remove) {
+      if (config.qrFileId) { try { await drive.files.delete({ fileId: config.qrFileId, supportsAllDrives: true }); } catch {} }
+      delete config.qrFileId;
+      await writeDriveJson(drive, ROOT_FOLDER_ID, '_hd_config.json', { ...config, updatedAt: new Date().toISOString() });
+      return res.json({ ok: true });
+    }
+
+    const m = /^data:(image\/(png|jpeg));base64,(.+)$/i.exec(req.body.dataUrl || '');
+    if (!m) return res.status(400).send('Invalid image (PNG or JPEG only)');
+    const mime = m[1];
+    const buffer = Buffer.from(m[3], 'base64');
+    const ext = mime.includes('png') ? 'png' : 'jpg';
+
+    if (config.qrFileId) { try { await drive.files.delete({ fileId: config.qrFileId, supportsAllDrives: true }); } catch {} }
+    const created = await drive.files.create({
+      requestBody: { name: `_hd_qr_${Date.now()}.${ext}`, parents: [ROOT_FOLDER_ID], mimeType: mime },
+      media: { mimeType: mime, body: Readable.from(buffer) },
+      supportsAllDrives: true, fields: 'id',
+    });
+    config.qrFileId = created.data.id;
+    await writeDriveJson(drive, ROOT_FOLDER_ID, '_hd_config.json', { ...config, updatedAt: new Date().toISOString() });
+    res.json({ ok: true, qrFileId: created.data.id });
   } catch (e) {
     res.status(500).send(e.message);
   }

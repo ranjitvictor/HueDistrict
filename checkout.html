@@ -161,6 +161,7 @@
           <div class="pay-panel active" id="panel-qr">
             <div class="qr-box">
               <canvas id="qr-canvas"></canvas>
+              <img id="qr-image" alt="Payment QR" style="display:none;width:220px;height:220px;object-fit:contain;border-radius:6px">
               <div class="qr-hint">Scan with Google Pay, PhonePe, Paytm, BHIM or any UPI app</div>
             </div>
           </div>
@@ -201,6 +202,7 @@
     let total = 0;
     let storeUpiId = '';
     let storeUpiName = 'Hue District';
+    let storeQrUrl = '';
     const orderId = genId();
 
     function genId() {
@@ -250,15 +252,26 @@
     }
 
     function renderPayment() {
-      var link = buildUpiLink();
       document.getElementById('upi-id-display').textContent = storeUpiId || 'Not configured — check Settings';
-      QRCode.toCanvas(document.getElementById('qr-canvas'), link, { width: 188, margin: 2, color: { dark: '#15110D', light: '#FBF6EB' } }, function(){});
+      var canvas = document.getElementById('qr-canvas');
+      var img = document.getElementById('qr-image');
+      if (storeQrUrl) {
+        // Use the merchant QR uploaded in admin Settings
+        canvas.style.display = 'none';
+        img.src = storeQrUrl;
+        img.style.display = 'block';
+      } else {
+        // Fall back to an auto-generated QR from the UPI ID + amount
+        img.style.display = 'none';
+        canvas.style.display = 'block';
+        QRCode.toCanvas(canvas, buildUpiLink(), { width: 188, margin: 2, color: { dark: '#15110D', light: '#FBF6EB' } }, function(){});
+      }
     }
 
     async function fetchConfig() {
       try {
         var r = await fetch(ADMIN + '/api/public-config');
-        if (r.ok) { var c = await r.json(); storeUpiId = c.upiId || ''; storeUpiName = c.upiName || 'Hue District'; }
+        if (r.ok) { var c = await r.json(); storeUpiId = c.upiId || ''; storeUpiName = c.upiName || 'Hue District'; storeQrUrl = c.qrUrl || ''; }
       } catch(e) {}
       renderPayment();
     }
