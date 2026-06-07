@@ -768,15 +768,15 @@ app.get('/', requireAuth, async (req, res) => {
     const reviewId = await findFolder(drive, ROOT_FOLDER_ID, REVIEW_FOLDER_NAME);
     const folders = await listSubfolders(drive, reviewId);
 
-    // Sort by the date in the folder name (e.g. "8-June-2025"), newest first.
+    // Sort by the date in the folder name (e.g. "8-June-2025"), oldest first.
     // Folders without a parseable date fall to the bottom.
     const dropTime = (name) => {
       const m = name.match(/(\d{1,2})[-\s]([A-Za-z]+)[-\s](\d{4})/);
-      if (!m) return -Infinity;
+      if (!m) return Infinity;
       const t = new Date(`${m[2]} ${m[1]}, ${m[3]}`).getTime();
-      return isNaN(t) ? -Infinity : t;
+      return isNaN(t) ? Infinity : t;
     };
-    folders.sort((a, b) => dropTime(b.name) - dropTime(a.name));
+    folders.sort((a, b) => dropTime(a.name) - dropTime(b.name));
 
     const items = folders.length
       ? folders.map(f => `
