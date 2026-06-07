@@ -557,8 +557,8 @@ const css = `
   .back { font-size: 13px; color: #6b7280; text-decoration: none; white-space: nowrap; }
   .back:hover { color: #111; }
   h1 { font-size: 21px; font-weight: 600; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
-  .poster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(600px, 1fr)); gap: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: 16px; }
+  .poster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(600px, 100%), 1fr)); gap: 20px; }
   .folder-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 20px; text-decoration: none; display: flex; flex-direction: column; gap: 10px; transition: box-shadow 0.15s; }
   .folder-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
   .folder-icon { font-size: 26px; }
@@ -632,6 +632,27 @@ const css = `
   .room-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 4px; border-top: 1px solid #f3f4f6; }
   .room-status { font-size: 13px; color: #6b7280; }
   .room-btns { display: flex; gap: 8px; }
+
+  @media (max-width: 700px) {
+    header { padding: 6px 16px; height: auto; min-height: 56px; flex-wrap: wrap; gap: 8px; row-gap: 6px; }
+    header > div:first-child { gap: 14px; flex-wrap: wrap; }
+    nav { gap: 14px !important; }
+    .email { display: none; }
+    main { padding: 20px 16px; }
+    .poster-card { grid-template-columns: 1fr; min-height: 0; }
+    .poster-img-wrap { max-height: 360px; }
+    .poster-img { width: 100%; height: auto; max-height: 360px; }
+    .page-hdr { flex-wrap: wrap; gap: 8px; }
+    h1 { font-size: 19px; }
+    .section-card { padding: 16px; }
+    .room-inner { padding: 12px; max-width: 96vw; }
+    .room-stage { min-width: 0; min-height: 200px; max-width: 92vw; }
+    .room-img { max-width: 92vw; }
+    .room-bar { flex-direction: column; align-items: stretch; gap: 10px; }
+    .room-btns { width: 100%; }
+    .room-btns .btn { flex: 1; }
+    .lightbox-inner { max-width: 96vw; }
+  }
 `;
 
 const toastScript = `
