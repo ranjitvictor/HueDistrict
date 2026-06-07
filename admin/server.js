@@ -4,11 +4,15 @@ const passport = require('passport');
 const { Strategy: GoogleStrategy } = require('passport-google-oauth20');
 const { google } = require('googleapis');
 const Anthropic = require('@anthropic-ai/sdk');
+const sharp = require('sharp');
+const crypto = require('crypto');
+const { Readable } = require('stream');
 
 const ROOT_FOLDER_ID = '1018xTizZybeAjs-9wlgWzJWx7mSL0k5t';
 const REVIEW_FOLDER_NAME = 'Posters for Review';
 const SALE_FOLDER_NAME = 'Posters for Sale';
 const ORDERS_FOLDER_NAME = '_hd_orders';
+const MOCKUPS_FOLDER_NAME = 'Room Mockups';
 
 const ALLOWED_EMAILS = new Set([
   'shriyaranjit28@gmail.com',
@@ -370,6 +374,109 @@ function buildPricingScript(config) {
 }
 
 
+// ── Room mockup compositing ───────────────────────────────
+const mockupCache = new Map(); // previewId → { buffer, t }
+
+function storeMockup(buffer) {
+  const id = crypto.randomUUID();
+  mockupCache.set(id, { buffer });
+  setTimeout(() => mockupCache.delete(id), 30 * 60 * 1000);
+  return id;
+}
+
+// Detect the empty (white) frame interior in a straight-on room mockup.
+// Scans pixels for the largest enclosed, rectangular, near-white region
+// that doesn't touch the image edges (so white walls are excluded).
+async function detectFrame(mockupBuffer) {
+  const DET_W = 700;
+  const meta = await sharp(mockupBuffer).metadata();
+  const detH = Math.max(1, Math.round((meta.height / meta.width) * DET_W));
+  const { data, info } = await sharp(mockupBuffer)
+    .resize(DET_W, detH, { fit: 'fill' })
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const W = info.width, H = info.height, ch = info.channels;
+  const isWhite = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) {
+    const r = data[i * ch], g = data[i * ch + 1], b = data[i * ch + 2];
+    if (r > 222 && g > 222 && b > 222 && (Math.max(r, g, b) - Math.min(r, g, b)) < 20) isWhite[i] = 1;
+  }
+
+  // Flood-fill connected components (4-connectivity)
+  const label = new Int32Array(W * H);
+  const comps = [];
+  const stack = [];
+  let cur = 0;
+  for (let s = 0; s < W * H; s++) {
+    if (!isWhite[s] || label[s]) continue;
+    cur++;
+    let minx = W, miny = H, maxx = 0, maxy = 0, area = 0, touchEdge = false;
+    stack.push(s); label[s] = cur;
+    while (stack.length) {
+      const p = stack.pop();
+      const x = p % W, y = (p / W) | 0;
+      area++;
+      if (x < minx) minx = x; if (x > maxx) maxx = x;
+      if (y < miny) miny = y; if (y > maxy) maxy = y;
+      if (x === 0 || y === 0 || x === W - 1 || y === H - 1) touchEdge = true;
+      if (x > 0 && isWhite[p - 1] && !label[p - 1]) { label[p - 1] = cur; stack.push(p - 1); }
+      if (x < W - 1 && isWhite[p + 1] && !label[p + 1]) { label[p + 1] = cur; stack.push(p + 1); }
+      if (y > 0 && isWhite[p - W] && !label[p - W]) { label[p - W] = cur; stack.push(p - W); }
+      if (y < H - 1 && isWhite[p + W] && !label[p + W]) { label[p + W] = cur; stack.push(p + W); }
+    }
+    const bw = maxx - minx + 1, bh = maxy - miny + 1;
+    comps.push({ minx, miny, bw, bh, area, fill: area / (bw * bh), touchEdge });
+  }
+
+  const minArea = W * H * 0.01;
+  const cand = comps.filter(c =>
+    !c.touchEdge && c.fill > 0.78 && c.area > minArea &&
+    c.bw > W * 0.04 && c.bh > H * 0.04 &&
+    (c.bw / c.bh) > 0.2 && (c.bw / c.bh) < 5
+  ).sort((a, b) => b.area - a.area);
+
+  if (!cand.length) return null;
+  const best = cand[0];
+  const sx = meta.width / W, sy = meta.height / H;
+  const inset = 2;
+  return {
+    x: Math.round((best.minx + inset) * sx),
+    y: Math.round((best.miny + inset) * sy),
+    w: Math.round((best.bw - 2 * inset) * sx),
+    h: Math.round((best.bh - 2 * inset) * sy),
+  };
+}
+
+// Place poster inside the frame, preserving aspect ratio (white padding).
+async function composeMockup(mockupBuffer, posterBuffer, frame) {
+  const poster = await sharp(posterBuffer)
+    .resize(frame.w, frame.h, { fit: 'contain', background: { r: 255, g: 255, b: 255 } })
+    .toBuffer();
+  return sharp(mockupBuffer)
+    .composite([{ input: poster, left: frame.x, top: frame.y }])
+    .png()
+    .toBuffer();
+}
+
+async function pickRandomMockup(drive, excludeId) {
+  const folderId = await findFolder(drive, ROOT_FOLDER_ID, MOCKUPS_FOLDER_NAME);
+  const files = (await listFiles(drive, folderId)).filter(f => /\.(png|jpe?g)$/i.test(f.name));
+  if (!files.length) throw new Error('No images in the "Room Mockups" folder');
+  let pool = files;
+  if (excludeId && files.length > 1) pool = files.filter(f => f.id !== excludeId);
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+async function fetchDriveBuffer(drive, fileId) {
+  const r = await drive.files.get(
+    { fileId, alt: 'media', supportsAllDrives: true },
+    { responseType: 'arraybuffer' }
+  );
+  return Buffer.from(r.data);
+}
+
 function esc(str) {
   return String(str)
     .replace(/&/g, '&amp;')
@@ -461,6 +568,13 @@ const css = `
   .lightbox-img { max-width: 90vw; max-height: 90vh; object-fit: contain; border-radius: 4px; display: block; }
   .lightbox-close { position: absolute; top: -14px; right: -14px; width: 32px; height: 32px; background: #fff; border: none; border-radius: 50%; cursor: pointer; font-size: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
   .lightbox-name { color: #fff; font-size: 13px; text-align: center; margin-top: 12px; opacity: 0.7; }
+  .room-inner { position: relative; background: #fff; border-radius: 12px; padding: 16px; max-width: 92vw; max-height: 92vh; display: flex; flex-direction: column; gap: 12px; }
+  .room-stage { display: flex; align-items: center; justify-content: center; min-width: 320px; min-height: 320px; max-width: 86vw; }
+  .room-img { max-width: 86vw; max-height: 74vh; object-fit: contain; border-radius: 6px; display: block; }
+  .room-loading { display: flex; align-items: center; gap: 10px; color: #6b7280; font-size: 14px; padding: 80px 40px; }
+  .room-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 4px; border-top: 1px solid #f3f4f6; }
+  .room-status { font-size: 13px; color: #6b7280; }
+  .room-btns { display: flex; gap: 8px; }
 `;
 
 const toastScript = `
@@ -480,6 +594,60 @@ const toastScript = `
     document.getElementById('lightbox').classList.remove('open');
   }
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
+`;
+
+const roomScript = `
+  var roomState = { folderId: null, baseName: null, webId: null, previewId: null, mockupId: null };
+  function setRoomBusy(busy, text) {
+    document.getElementById('room-loading').style.display = busy ? 'flex' : 'none';
+    if (text) document.getElementById('room-loading-text').textContent = text;
+    document.getElementById('room-another').disabled = busy;
+    document.getElementById('room-accept').disabled = busy;
+  }
+  async function previewRoom(folderId, baseName, webId) {
+    roomState = { folderId: folderId, baseName: baseName, webId: webId, previewId: null, mockupId: null };
+    document.getElementById('room-img').style.display = 'none';
+    document.getElementById('room-status').textContent = '';
+    document.getElementById('room-modal').classList.add('open');
+    await loadRoom(null);
+  }
+  async function loadRoom(excludeId) {
+    setRoomBusy(true, 'Generating room preview…');
+    try {
+      var r = await fetch('/api/mockup', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ webFileId: roomState.webId, excludeMockupId: excludeId }) });
+      if (r.ok) {
+        var d = await r.json();
+        roomState.previewId = d.previewId;
+        roomState.mockupId = d.mockupId;
+        var img = document.getElementById('room-img');
+        img.onload = function() { setRoomBusy(false); img.style.display = 'block'; };
+        img.src = '/api/mockup-preview/' + d.previewId;
+        document.getElementById('room-status').textContent = d.mockupName;
+      } else {
+        setRoomBusy(false);
+        document.getElementById('room-status').textContent = 'Error: ' + await r.text();
+        document.getElementById('room-another').disabled = false;
+      }
+    } catch (e) {
+      setRoomBusy(false);
+      document.getElementById('room-status').textContent = 'Network error';
+      document.getElementById('room-another').disabled = false;
+    }
+  }
+  function tryAnotherRoom() { loadRoom(roomState.mockupId); }
+  async function acceptRoom() {
+    if (!roomState.previewId) return;
+    var btn = document.getElementById('room-accept');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      var r = await fetch('/api/mockup-accept', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ previewId: roomState.previewId, folderId: roomState.folderId, baseName: roomState.baseName }) });
+      if (r.ok) { var d = await r.json(); showToast('Saved ' + d.fileName + ' ✓'); closeRoom(); }
+      else { document.getElementById('room-status').textContent = 'Error: ' + await r.text(); }
+    } catch (e) { document.getElementById('room-status').textContent = 'Network error'; }
+    btn.disabled = false; btn.textContent = 'Accept & Save';
+  }
+  function closeRoom() { document.getElementById('room-modal').classList.remove('open'); }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeRoom(); });
 `;
 
 function layout(title, user, body, extraScript = '') {
@@ -518,7 +686,23 @@ function layout(title, user, body, extraScript = '') {
       <div class="lightbox-name" id="lightbox-name"></div>
     </div>
   </div>
-  <script>${toastScript}${extraScript}</script>
+  <div class="lightbox" id="room-modal" onclick="if(event.target===this)closeRoom()">
+    <div class="room-inner">
+      <button class="lightbox-close" onclick="closeRoom()">×</button>
+      <div class="room-stage">
+        <div class="room-loading" id="room-loading"><div class="spinner"></div><span id="room-loading-text">Generating room preview…</span></div>
+        <img class="room-img" id="room-img" src="" alt="" style="display:none">
+      </div>
+      <div class="room-bar">
+        <span class="room-status" id="room-status"></span>
+        <div class="room-btns">
+          <button class="btn btn-gray" id="room-another" onclick="tryAnotherRoom()" style="width:auto;padding:8px 16px" disabled>↺ Try another room</button>
+          <button class="btn btn-green" id="room-accept" onclick="acceptRoom()" style="width:auto;padding:8px 20px" disabled>Accept &amp; Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>${toastScript}${roomScript}${extraScript}</script>
 </body>
 </html>`;
 }
@@ -694,6 +878,9 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
                         ? `<button class="btn btn-green" onclick="approve(this,'${esc(folderName)}','${p.ig.id}','${p.web.id}','${esc(p.ig.name)}','${esc(p.web.name)}')">Ready for Sale</button>`
                         : `<div class="badge-missing">Missing _ig or _web version</div>`}
                   </div>
+                  ${p.web
+                    ? `<button class="btn btn-gray" onclick="previewRoom('${esc(folderId)}','${esc(p.name)}','${p.web.id}')">🖼 Preview in Room</button>`
+                    : ''}
                   ${p.pdf
                     ? `<a href="/api/download/${esc(p.pdf.id)}" class="btn btn-gray">Download PDF</a>`
                     : ''}
@@ -989,6 +1176,71 @@ app.post('/api/unlist', requireAuth, async (req, res) => {
     ));
 
     res.sendStatus(200);
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
+// Generate a room-mockup preview (poster composited into a random frame)
+app.post('/api/mockup', requireAuth, async (req, res) => {
+  try {
+    const { webFileId, excludeMockupId } = req.body;
+    if (!webFileId) return res.status(400).send('Missing webFileId');
+
+    const drive = getDriveClient(req.user);
+    const mockup = await pickRandomMockup(drive, excludeMockupId);
+    const [mockupBuf, posterBuf] = await Promise.all([
+      fetchDriveBuffer(drive, mockup.id),
+      fetchDriveBuffer(drive, webFileId),
+    ]);
+
+    const frame = await detectFrame(mockupBuf);
+    if (!frame) return res.status(422).send(`No empty frame detected in "${mockup.name}". Try another room.`);
+
+    const out = await composeMockup(mockupBuf, posterBuf, frame);
+    const previewId = storeMockup(out);
+    res.json({ previewId, mockupId: mockup.id, mockupName: mockup.name });
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
+app.get('/api/mockup-preview/:id', requireAuth, (req, res) => {
+  const entry = mockupCache.get(req.params.id);
+  if (!entry) return res.status(404).send('Preview expired');
+  res.set('Content-Type', 'image/png');
+  res.set('Cache-Control', 'private, max-age=600');
+  res.send(entry.buffer);
+});
+
+// Save accepted mockup to Drive as {baseName}_room.png in the poster's folder
+app.post('/api/mockup-accept', requireAuth, async (req, res) => {
+  try {
+    const { previewId, folderId, baseName } = req.body;
+    if (!previewId || !folderId || !baseName) return res.status(400).send('Missing fields');
+    const entry = mockupCache.get(previewId);
+    if (!entry) return res.status(404).send('Preview expired — please regenerate');
+
+    const drive = getDriveClient(req.user);
+    const fileName = `${baseName}_room.png`;
+    const existing = await drive.files.list({
+      q: `'${folderId}' in parents and name = '${fileName.replace(/'/g, "\\'")}' and trashed = false`,
+      fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true,
+    });
+    if (existing.data.files.length) {
+      await drive.files.update({
+        fileId: existing.data.files[0].id,
+        media: { mimeType: 'image/png', body: Readable.from(entry.buffer) },
+        supportsAllDrives: true,
+      });
+    } else {
+      await drive.files.create({
+        requestBody: { name: fileName, parents: [folderId], mimeType: 'image/png' },
+        media: { mimeType: 'image/png', body: Readable.from(entry.buffer) },
+        supportsAllDrives: true, fields: 'id',
+      });
+    }
+    res.json({ ok: true, fileName });
   } catch (err) {
     res.status(500).send(err.message);
   }
