@@ -620,7 +620,7 @@ async function analyzePosterForRoom(posterBuffer) {
       role: 'user',
       content: [
         { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: resized.toString('base64') } },
-        { type: 'text', text: 'Look at this poster artwork. Choose an interior room that would complement and harmonise with its colours and mood for a lifestyle product shot. Reply with ONLY compact JSON: {"wallColor":"<a specific wall paint colour that complements the poster, e.g. warm sage green>","vibe":"<3-6 word room mood/style, e.g. cozy minimalist scandinavian>"}' },
+        { type: 'text', text: 'Look at this poster artwork. Choose a BRIGHT, LIGHT, airy interior that complements and harmonises with its colours and mood for a cheerful lifestyle product shot. Pick a light/pale wall paint colour that complements the poster (avoid dark, moody or heavily saturated tones — keep it bright and inviting) and a cheerful, airy vibe. Reply with ONLY compact JSON: {"wallColor":"<a LIGHT, bright wall colour that complements the poster, e.g. soft warm cream, pale sage, light blush>","vibe":"<3-6 word bright cheerful airy mood, e.g. bright airy scandinavian>"}' },
       ],
     }],
   });
@@ -631,10 +631,10 @@ async function analyzePosterForRoom(posterBuffer) {
 
 // Generate a room with a large empty bare wall (no frame), colours coherent with the poster.
 async function leoGenerateBareRoom(palette = {}) {
-  const wall = palette.wallColor ? `a large clear empty ${palette.wallColor} wall` : 'a large clear empty blank wall';
+  const wall = palette.wallColor ? `a large clear empty ${palette.wallColor} wall` : 'a large clear empty bright wall';
   const style = palette.vibe ? `, ${palette.vibe} interior` : '';
   const url = await leoGenerate({
-    prompt: `A professional interior photograph of a stylish living room${style} with ${wall} at eye level. Tasteful furniture below and to the sides. The wall itself is completely bare — no pictures, no frames, no posters, no wall art. Soft natural daylight, photorealistic, high detail.`,
+    prompt: `A bright, airy, sun-filled professional interior photograph of a cheerful modern living room${style} with ${wall} at eye level. Large windows with abundant natural daylight, light and fresh atmosphere, soft bright even lighting, inviting and warm. Tasteful light-toned furniture below and to the sides. The wall itself is completely bare — no pictures, no frames, no posters, no wall art. Photorealistic, high detail.`,
     modelId: LEONARDO_MODEL,
     contrast: 3.5,
     styleUUID: '5bdc3f2a-1be6-4d1c-8e77-992a30824a2c', // Stock Photo — realistic interiors
@@ -666,6 +666,8 @@ async function detectPosterPlacement(roomBuffer) {
 
 // Composite the poster onto the wall as a 3D-looking mounted print with a drop shadow.
 async function composeOnWall(roomBuffer, posterBuffer) {
+  // Lift the room's brightness a touch so scenes read bright and cheerful.
+  roomBuffer = await sharp(roomBuffer).modulate({ brightness: 1.12 }).toBuffer();
   const meta = await sharp(roomBuffer).metadata();
   let place = null;
   try { place = await detectPosterPlacement(roomBuffer); } catch (e) {}
