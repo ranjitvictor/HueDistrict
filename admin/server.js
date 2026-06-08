@@ -521,8 +521,8 @@ async function fetchDriveBuffer(drive, fileId) {
 
 // ── Leonardo.ai ───────────────────────────────────────────
 const LEONARDO_BASE = 'https://cloud.leonardo.ai/api/rest/v1';
-// Leonardo Diffusion XL (stable, photoreal-capable). Override via env if desired.
-const LEONARDO_MODEL = process.env.LEONARDO_MODEL_ID || '1e60896f-3c26-4296-8ecc-53e2afecc132';
+// Default: Leonardo Phoenix/Flux model from the official recipe. Override via LEONARDO_MODEL_ID.
+const LEONARDO_MODEL = process.env.LEONARDO_MODEL_ID || 'b2614463-296c-462a-9586-aafdb8f00e36';
 
 function leonardoConfigured() { return !!process.env.LEONARDO_API_KEY; }
 
@@ -570,8 +570,7 @@ async function downloadToBuffer(url) {
 // Faithful mode: generate an empty room with a blank frame to composite into.
 async function leoGenerateRoom() {
   const url = await leoGenerate({
-    prompt: 'A professional interior photograph of a stylish modern living room, a single empty blank picture frame hanging centered on a softly coloured accent wall, the inside of the frame is plain solid white and empty, natural daylight, photorealistic, high detail',
-    negative_prompt: 'artwork inside frame, picture inside the frame, poster, painting, text, watermark, multiple frames, clutter, people',
+    prompt: 'A professional interior photograph of a stylish modern living room. A single picture frame hangs centered on a softly coloured accent wall. The inside of the frame is completely plain, solid white and empty — no artwork, no picture, no text inside it. Natural daylight, photorealistic, high detail.',
     modelId: LEONARDO_MODEL,
     width: 1024, height: 768, num_images: 1,
   });
@@ -596,7 +595,6 @@ async function leoGenerateScene(posterBuffer) {
   const initId = await leoUploadInitImage(posterBuffer, 'png');
   const url = await leoGenerate({
     prompt: 'a framed art print of this image hanging on the wall of a stylish, well-lit modern living room, interior design photography, the framed artwork is the focal point on the wall, photorealistic',
-    negative_prompt: 'distorted, blurry, low quality, warped frame, text artifacts',
     modelId: LEONARDO_MODEL,
     width: 1024, height: 768, num_images: 1,
     init_image_id: initId,
