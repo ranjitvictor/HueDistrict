@@ -377,7 +377,7 @@
                 method:'POST', headers:{'Content-Type':'application/json'},
                 body: JSON.stringify({ orderId: orderId, razorpay_order_id: resp.razorpay_order_id, razorpay_payment_id: resp.razorpay_payment_id, razorpay_signature: resp.razorpay_signature })
               });
-              if (v.ok) { showConfirmation('Payment received — your order is confirmed. We\\'ll be in touch on WhatsApp with dispatch details.'); }
+              if (v.ok) { showConfirmation('Payment received — your order is confirmed. We will be in touch on WhatsApp with dispatch details.'); }
               else { alert('Payment captured but verification failed. Please contact us with order ' + orderId); }
             } catch(e) { alert('Verification error. Please contact us with order ' + orderId); }
           },
