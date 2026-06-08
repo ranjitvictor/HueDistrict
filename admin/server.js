@@ -1120,14 +1120,20 @@ app.get('/auth/google', passport.authenticate('google', {
 app.get('/auth/google/callback',
   passport.authenticate('google', { failureRedirect: '/login?error=access_denied' }),
   async (req, res) => {
-    // Persist this admin's refresh token so public order writes can act as a real
-    // user (service accounts can't create files in a personal Drive — no quota).
+    // Persist a refresh token so server-side writes act as ONE consistent owner
+    // (service accounts can't create files in a personal Drive; and only a file's
+    // owner can delete it). Pin to the first admin who signs in; only refresh that
+    // same account's token — don't let a later admin take over ownership.
     try {
       if (req.user && req.user.refreshToken) {
         const drive = getDriveClient(req.user);
-        await writeDriveJson(drive, ROOT_FOLDER_ID, '_hd_oauth.json', {
-          refreshToken: req.user.refreshToken, email: req.user.email, updatedAt: new Date().toISOString(),
-        });
+        let existing = null;
+        try { existing = await readDriveJson(drive, ROOT_FOLDER_ID, '_hd_oauth.json'); } catch (e) {}
+        if (!existing || !existing.refreshToken || existing.email === req.user.email) {
+          await writeDriveJson(drive, ROOT_FOLDER_ID, '_hd_oauth.json', {
+            refreshToken: req.user.refreshToken, email: req.user.email, updatedAt: new Date().toISOString(),
+          });
+        }
       }
     } catch (e) { /* non-fatal */ }
     res.redirect('/');
@@ -1450,7 +1456,8 @@ app.post('/api/approve', requireAuth, async (req, res) => {
     const { folderName, igId, webId, srcFolderId, baseName } = req.body;
     if (!folderName || !igId || !webId) return res.status(400).send('Missing fields');
 
-    const drive = getDriveClient(req.user);
+    // Use one consistent owner for sale-folder files so any admin can later unlist them.
+    const drive = (await getDelegatedDriveClient()) || getDriveClient(req.user);
     const saleFolderId = await findFolder(drive, ROOT_FOLDER_ID, SALE_FOLDER_NAME);
     const destId = await getOrCreateSubfolder(drive, saleFolderId, folderName);
 
@@ -1551,7 +1558,8 @@ app.post('/api/unlist', requireAuth, async (req, res) => {
     const { folderName, igName, webName, baseName } = req.body;
     if (!folderName || !igName || !webName) return res.status(400).send('Missing fields');
 
-    const drive = getDriveClient(req.user);
+    // Delete as the same consistent owner that created the sale-folder copies.
+    const drive = (await getDelegatedDriveClient()) || getDriveClient(req.user);
     const saleFolderId = await findFolder(drive, ROOT_FOLDER_ID, SALE_FOLDER_NAME);
 
     const subRes = await drive.files.list({
