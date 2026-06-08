@@ -572,6 +572,8 @@ async function leoGenerateRoom() {
   const url = await leoGenerate({
     prompt: 'A professional interior photograph of a stylish modern living room. A single picture frame hangs centered on a softly coloured accent wall. The inside of the frame is completely plain, solid white and empty — no artwork, no picture, no text inside it. Natural daylight, photorealistic, high detail.',
     modelId: LEONARDO_MODEL,
+    contrast: 3.5,
+    styleUUID: '5bdc3f2a-1be6-4d1c-8e77-992a30824a2c', // Stock Photo — realistic interiors
     width: 1024, height: 768, num_images: 1,
   });
   return downloadToBuffer(url);
@@ -596,11 +598,12 @@ async function leoGenerateScene(posterBuffer) {
   const url = await leoGenerate({
     prompt: 'a stylish, well-lit modern living room interior with a large framed art print as the focal point on the wall, interior design photography, photorealistic',
     modelId: LEONARDO_MODEL,
+    contrast: 3.5,
     width: 1024, height: 768, num_images: 1,
     controlnets: [{
       initImageId: initId,
       initImageType: 'UPLOADED',
-      preprocessorId: 67,        // Style Reference → StyleTransfer
+      preprocessorId: 233,       // Flux Dev — Content Reference
       strengthType: 'High',
     }],
   });
@@ -867,6 +870,7 @@ function layout(title, user, body, extraScript = '') {
         <div class="room-sources">
           <button class="btn btn-gray" onclick="srcFolder()" style="width:auto;padding:8px 14px">🎲 Mockup folder</button>
           <button class="btn btn-gray" onclick="srcGenerate()" style="width:auto;padding:8px 14px">✨ Generate room</button>
+          <button class="btn btn-gray" onclick="srcScene()" style="width:auto;padding:8px 14px">🖼 AI scene</button>
         </div>
         <div class="room-btns">
           <span class="room-status" id="room-status"></span>
