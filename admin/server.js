@@ -684,17 +684,52 @@ async function composeOnWall(roomBuffer, posterBuffer) {
   px = Math.max(6, Math.min(px, meta.width - pw - 6));
   py = Math.max(6, Math.min(py, meta.height - ph - 6));
 
-  // Poster with a thin dark edge so it reads as a physical object against the wall
-  const poster = await sharp(posterBuffer)
+  // --- Sample the room's light from the wall behind/around the poster ---
+  let lum = 0.6, cast = { r: 128, g: 128, b: 128 }, lightFromLeft = true;
+  try {
+    const reg = (await sharp(roomBuffer).extract({ left: px, top: py, width: pw, height: ph }).stats()).channels;
+    cast = { r: reg[0].mean, g: reg[1].mean, b: reg[2].mean };
+    lum = (0.299 * cast.r + 0.587 * cast.g + 0.114 * cast.b) / 255;
+    const sw = Math.max(8, Math.round(pw * 0.5));
+    const lx = Math.max(0, px - Math.round(pw * 0.6));
+    const rx = Math.min(meta.width - sw, px + pw + Math.round(pw * 0.1));
+    const lc = (await sharp(roomBuffer).extract({ left: lx, top: py, width: Math.min(sw, meta.width - lx), height: ph }).stats()).channels;
+    const rc = (await sharp(roomBuffer).extract({ left: rx, top: py, width: Math.min(sw, meta.width - rx), height: ph }).stats()).channels;
+    const lLum = 0.299 * lc[0].mean + 0.587 * lc[1].mean + 0.114 * lc[2].mean;
+    const rLum = 0.299 * rc[0].mean + 0.587 * rc[1].mean + 0.114 * rc[2].mean;
+    lightFromLeft = lLum >= rLum;
+  } catch (e) {}
+
+  // --- Grade the poster so it sits in the room's light, not on top of it ---
+  const brightness = Math.min(1.04, Math.max(0.62, 0.72 + lum * 0.33));
+  let graded = await sharp(posterBuffer)
     .resize(pw, ph, { fit: 'fill' })
-    .extend({ top: 3, bottom: 3, left: 3, right: 3, background: { r: 22, g: 20, b: 18 } })
+    .modulate({ brightness, saturation: 0.9 })
+    .linear(0.9, 255 * 0.05)   // gentle contrast lift to match ambient haze
     .toBuffer();
 
-  // Drop shadow — a dark rect at an offset, blurred across a full-size transparent layer
-  const blur = Math.max(8, Math.round(Math.max(pw, ph) * 0.025));
-  const offX = Math.round(blur * 0.5);
-  const offY = Math.round(blur * 0.9);
-  const darkRect = await sharp({ create: { width: pw, height: ph, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0.5 } } }).png().toBuffer();
+  const castHex = '#' + [cast.r, cast.g, cast.b].map(v => Math.round(Math.min(255, Math.max(0, v))).toString(16).padStart(2, '0')).join('');
+  const lightSide = lightFromLeft ? '0%' : '100%';
+  const darkSide = lightFromLeft ? '100%' : '0%';
+  const washSVG = Buffer.from(`<svg width="${pw}" height="${ph}"><rect width="${pw}" height="${ph}" fill="${castHex}" opacity="0.16"/></svg>`);
+  const shadeSVG = Buffer.from(`<svg width="${pw}" height="${ph}"><defs><linearGradient id="g" x1="${lightSide}" y1="0%" x2="${darkSide}" y2="0%"><stop offset="0%" stop-color="white" stop-opacity="0.10"/><stop offset="55%" stop-color="black" stop-opacity="0"/><stop offset="100%" stop-color="black" stop-opacity="0.22"/></linearGradient></defs><rect width="${pw}" height="${ph}" fill="url(#g)"/></svg>`);
+  const glareSVG = Buffer.from(`<svg width="${pw}" height="${ph}"><defs><linearGradient id="gl" x1="${lightSide}" y1="0%" x2="${darkSide}" y2="100%"><stop offset="0%" stop-color="white" stop-opacity="0.12"/><stop offset="35%" stop-color="white" stop-opacity="0"/></linearGradient></defs><rect width="${pw}" height="${ph}" fill="url(#gl)"/></svg>`);
+  graded = await sharp(graded).composite([
+    { input: washSVG, blend: 'soft-light' },
+    { input: shadeSVG, blend: 'over' },
+    { input: glareSVG, blend: 'screen' },
+  ]).toBuffer();
+
+  // Thin dark edge so it reads as a physical printed object
+  const poster = await sharp(graded)
+    .extend({ top: 3, bottom: 3, left: 3, right: 3, background: { r: 28, g: 26, b: 24 } })
+    .toBuffer();
+
+  // Soft drop shadow, cast away from the light source
+  const blur = Math.max(10, Math.round(Math.max(pw, ph) * 0.03));
+  const offX = (lightFromLeft ? 1 : -1) * Math.round(blur * 0.5);
+  const offY = Math.round(blur * 0.85);
+  const darkRect = await sharp({ create: { width: pw, height: ph, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0.32 } } }).png().toBuffer();
   const shadowLeft = Math.max(0, Math.min(px + offX, meta.width - pw));
   const shadowTop = Math.max(0, Math.min(py + offY, meta.height - ph));
   const shadow = await sharp({ create: { width: meta.width, height: meta.height, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } })
