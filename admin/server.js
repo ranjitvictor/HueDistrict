@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const { Readable } = require('stream');
 
 const ROOT_FOLDER_ID = '1018xTizZybeAjs-9wlgWzJWx7mSL0k5t';
+const OWNER_EMAIL = process.env.OWNER_EMAIL || 'ranjitvictor@gmail.com';
 const REVIEW_FOLDER_NAME = 'Posters for Review';
 const SALE_FOLDER_NAME = 'Posters for Sale';
 const ORDERS_FOLDER_NAME = '_hd_orders';
@@ -1129,7 +1130,9 @@ app.get('/auth/google/callback',
         const drive = getDriveClient(req.user);
         let existing = null;
         try { existing = await readDriveJson(drive, ROOT_FOLDER_ID, '_hd_oauth.json'); } catch (e) {}
-        if (!existing || !existing.refreshToken || existing.email === req.user.email) {
+        // Pin delegation to the owner. The owner can always (re)claim it; others
+        // only bootstrap it if it's missing or already theirs.
+        if (!existing || !existing.refreshToken || req.user.email === OWNER_EMAIL || existing.email === req.user.email) {
           await writeDriveJson(drive, ROOT_FOLDER_ID, '_hd_oauth.json', {
             refreshToken: req.user.refreshToken, email: req.user.email, updatedAt: new Date().toISOString(),
           });
@@ -1552,21 +1555,35 @@ app.post('/api/save-meta', requireAuth, async (req, res) => {
   }
 });
 
-// Delete _ig + _web copies from Posters for Sale
+// Try hard to remove a file regardless of which admin owns it:
+// delete as delegated owner, else as current admin, else detach it from the folder.
+async function removeFromFolder(drives, fileId, parentId) {
+  for (const d of drives) {
+    if (!d) continue;
+    try { await d.files.delete({ fileId, supportsAllDrives: true }); return true; } catch (e) {}
+  }
+  for (const d of drives) {
+    if (!d) continue;
+    try { await d.files.update({ fileId, removeParents: parentId, supportsAllDrives: true }); return true; } catch (e) {}
+  }
+  return false;
+}
+
+// Remove _ig + _web (+ _room) copies from Posters for Sale
 app.post('/api/unlist', requireAuth, async (req, res) => {
   try {
     const { folderName, igName, webName, baseName } = req.body;
     if (!folderName || !igName || !webName) return res.status(400).send('Missing fields');
 
-    // Delete as the same consistent owner that created the sale-folder copies.
-    const drive = (await getDelegatedDriveClient()) || getDriveClient(req.user);
-    const saleFolderId = await findFolder(drive, ROOT_FOLDER_ID, SALE_FOLDER_NAME);
+    const userDrive = getDriveClient(req.user);
+    const delegated = await getDelegatedDriveClient();
+    const drives = [delegated, userDrive].filter(Boolean);
+    const readDrive = delegated || userDrive;
 
-    const subRes = await drive.files.list({
+    const saleFolderId = await findFolder(readDrive, ROOT_FOLDER_ID, SALE_FOLDER_NAME);
+    const subRes = await readDrive.files.list({
       q: `'${saleFolderId}' in parents and name = '${folderName.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-      fields: 'files(id)',
-      supportsAllDrives: true,
-      includeItemsFromAllDrives: true,
+      fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true,
     });
     if (!subRes.data.files.length) return res.status(404).send('Sale subfolder not found');
 
@@ -1574,17 +1591,15 @@ app.post('/api/unlist', requireAuth, async (req, res) => {
     const names = [igName, webName];
     if (baseName) names.push(`${baseName}_room.png`);
     const nameClause = names.map(n => `name = '${n.replace(/'/g, "\\'")}'`).join(' or ');
-    const filesRes = await drive.files.list({
+    const filesRes = await readDrive.files.list({
       q: `'${saleSubId}' in parents and (${nameClause}) and trashed = false`,
-      fields: 'files(id)',
-      supportsAllDrives: true,
-      includeItemsFromAllDrives: true,
+      fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true,
     });
 
-    await Promise.all(filesRes.data.files.map(f =>
-      drive.files.delete({ fileId: f.id, supportsAllDrives: true })
-    ));
-
+    const results = await Promise.all(filesRes.data.files.map(f => removeFromFolder(drives, f.id, saleSubId)));
+    if (results.some(ok => !ok)) {
+      return res.status(403).send('Could not remove some files — they may be owned by another account. Ask the owner to delete them, or move the brand to a Shared Drive.');
+    }
     res.sendStatus(200);
   } catch (err) {
     res.status(500).send(err.message);
