@@ -654,7 +654,7 @@ async function detectPosterPlacement(roomBuffer) {
       role: 'user',
       content: [
         { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: resized.toString('base64') } },
-        { type: 'text', text: 'Decide where to realistically hang ONE poster on the wall in this room. Estimate the wall height and room depth from the furniture and camera distance, and choose a realistic physical poster size (a typical wall poster is ~50–80cm wide). The poster must sit at eye level in the UPPER portion of the clear wall, clearly ABOVE any sofa, bed, console or other furniture, with comfortable space above the furniture, and must not touch the ceiling. Reply with ONLY compact JSON using fractions of the image dimensions: {"centerX":<0-1 horizontal centre>,"topY":<0-1 top edge of the poster>,"width":<0-1 poster width as fraction of image width>}' },
+        { type: 'text', text: 'Decide where to realistically hang ONE poster on the wall in this room. Estimate scale from the furniture and camera distance. Size it conservatively and realistically: a single hung poster is modest — its width should be roughly 30-40% of the width of the sofa/bed/furniture directly below it (a typical poster is ~50-70cm wide). Do NOT make it large or a statement piece. Position it at eye level in the UPPER portion of the clear wall, clearly ABOVE the furniture with comfortable breathing space, and not touching the ceiling. Reply with ONLY compact JSON using fractions of the image dimensions: {"centerX":<0-1 horizontal centre>,"topY":<0-1 top edge of the poster>,"width":<0-1 poster width as fraction of image width>}' },
       ],
     }],
   });
@@ -672,7 +672,8 @@ async function composeOnWall(roomBuffer, posterBuffer) {
   if (!place) place = { centerX: 0.5, topY: 0.13, width: 0.28 };
 
   const pMeta = await sharp(posterBuffer).metadata();
-  const widthFrac = Math.min(Math.max(place.width, 0.08), 0.55);
+  // Err on the smaller side — Claude tends to oversize. Scale down and cap tighter.
+  const widthFrac = Math.min(Math.max(place.width * 0.78, 0.08), 0.34);
   let pw = Math.max(40, Math.round(meta.width * widthFrac));
   let ph = Math.max(40, Math.round(pw * (pMeta.height / pMeta.width)));
   // Don't let it run off the wall vertically
