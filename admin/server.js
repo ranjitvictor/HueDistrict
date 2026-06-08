@@ -519,6 +519,92 @@ async function fetchDriveBuffer(drive, fileId) {
   return Buffer.from(r.data);
 }
 
+// ── Leonardo.ai ───────────────────────────────────────────
+const LEONARDO_BASE = 'https://cloud.leonardo.ai/api/rest/v1';
+// Leonardo Diffusion XL (stable, photoreal-capable). Override via env if desired.
+const LEONARDO_MODEL = process.env.LEONARDO_MODEL_ID || '1e60896f-3c26-4296-8ecc-53e2afecc132';
+
+function leonardoConfigured() { return !!process.env.LEONARDO_API_KEY; }
+
+async function leoFetch(path, opts = {}) {
+  const r = await fetch(LEONARDO_BASE + path, {
+    ...opts,
+    headers: {
+      'accept': 'application/json',
+      'content-type': 'application/json',
+      'authorization': 'Bearer ' + process.env.LEONARDO_API_KEY,
+      ...(opts.headers || {}),
+    },
+  });
+  const text = await r.text();
+  let json; try { json = JSON.parse(text); } catch { json = { raw: text }; }
+  if (!r.ok) throw new Error('Leonardo ' + path + ' → ' + (json.error || json.raw || r.status));
+  return json;
+}
+
+// Create a generation, poll until COMPLETE, return the first image URL.
+async function leoGenerate(body) {
+  const res = await leoFetch('/generations', { method: 'POST', body: JSON.stringify(body) });
+  const id = res.sdGenerationJob && res.sdGenerationJob.generationId;
+  if (!id) throw new Error('Leonardo did not return a generation id');
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const g = await leoFetch('/generations/' + id);
+    const gen = g.generations_by_pk;
+    if (gen && gen.status === 'COMPLETE') {
+      const imgs = gen.generated_images || [];
+      if (!imgs.length) throw new Error('Leonardo returned no images');
+      return imgs[0].url;
+    }
+    if (gen && gen.status === 'FAILED') throw new Error('Leonardo generation failed');
+  }
+  throw new Error('Leonardo generation timed out');
+}
+
+async function downloadToBuffer(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('Image download failed: ' + r.status);
+  return Buffer.from(await r.arrayBuffer());
+}
+
+// Faithful mode: generate an empty room with a blank frame to composite into.
+async function leoGenerateRoom() {
+  const url = await leoGenerate({
+    prompt: 'A professional interior photograph of a stylish modern living room, a single empty blank picture frame hanging centered on a softly coloured accent wall, the inside of the frame is plain solid white and empty, natural daylight, photorealistic, high detail',
+    negative_prompt: 'artwork inside frame, picture inside the frame, poster, painting, text, watermark, multiple frames, clutter, people',
+    modelId: LEONARDO_MODEL,
+    width: 1024, height: 768, num_images: 1,
+  });
+  return downloadToBuffer(url);
+}
+
+// Upload an image to Leonardo, return its init image id.
+async function leoUploadInitImage(buffer, ext = 'png') {
+  const init = await leoFetch('/init-image', { method: 'POST', body: JSON.stringify({ extension: ext }) });
+  const u = init.uploadInitImage;
+  const fields = JSON.parse(u.fields);
+  const form = new FormData();
+  Object.entries(fields).forEach(([k, v]) => form.append(k, v));
+  form.append('file', new Blob([buffer]), 'init.' + ext);
+  const up = await fetch(u.url, { method: 'POST', body: form });
+  if (!up.ok) throw new Error('Init image upload failed: ' + up.status);
+  return u.id;
+}
+
+// Guidance mode: Leonardo paints the poster into a scene (reinterprets artwork).
+async function leoGenerateScene(posterBuffer) {
+  const initId = await leoUploadInitImage(posterBuffer, 'png');
+  const url = await leoGenerate({
+    prompt: 'a framed art print of this image hanging on the wall of a stylish, well-lit modern living room, interior design photography, the framed artwork is the focal point on the wall, photorealistic',
+    negative_prompt: 'distorted, blurry, low quality, warped frame, text artifacts',
+    modelId: LEONARDO_MODEL,
+    width: 1024, height: 768, num_images: 1,
+    init_image_id: initId,
+    init_strength: 0.4,
+  });
+  return downloadToBuffer(url);
+}
+
 function esc(str) {
   return String(str)
     .replace(/&/g, '&amp;')
@@ -631,7 +717,8 @@ const css = `
   .room-loading { display: flex; align-items: center; gap: 10px; color: #6b7280; font-size: 14px; padding: 80px 40px; }
   .room-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 4px; border-top: 1px solid #f3f4f6; }
   .room-status { font-size: 13px; color: #6b7280; }
-  .room-btns { display: flex; gap: 8px; }
+  .room-btns { display: flex; gap: 8px; align-items: center; }
+  .room-sources { display: flex; gap: 8px; flex-wrap: wrap; }
 
   @media (max-width: 700px) {
     header { padding: 6px 16px; height: auto; min-height: 56px; flex-wrap: wrap; gap: 8px; row-gap: 6px; }
@@ -679,40 +766,43 @@ const roomScript = `
   function setRoomBusy(busy, text) {
     document.getElementById('room-loading').style.display = busy ? 'flex' : 'none';
     if (text) document.getElementById('room-loading-text').textContent = text;
-    document.getElementById('room-another').disabled = busy;
-    document.getElementById('room-accept').disabled = busy;
+    document.querySelectorAll('.room-sources .btn').forEach(function(b){ b.disabled = busy; });
+    document.getElementById('room-accept').disabled = busy || !roomState.previewId;
   }
-  async function previewRoom(folderId, baseName, webId) {
+  function previewRoom(folderId, baseName, webId) {
     roomState = { folderId: folderId, baseName: baseName, webId: webId, previewId: null, mockupId: null };
     document.getElementById('room-img').style.display = 'none';
     document.getElementById('room-status').textContent = '';
+    document.getElementById('room-accept').disabled = true;
     document.getElementById('room-modal').classList.add('open');
-    await loadRoom(null);
+    srcFolder();
   }
-  async function loadRoom(excludeId) {
-    setRoomBusy(true, 'Generating room preview…');
+  async function runSource(endpoint, body, label) {
+    document.getElementById('room-img').style.display = 'none';
+    roomState.previewId = null;
+    setRoomBusy(true, label);
     try {
-      var r = await fetch('/api/mockup', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ webFileId: roomState.webId, excludeMockupId: excludeId }) });
+      var r = await fetch(endpoint, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
       if (r.ok) {
         var d = await r.json();
         roomState.previewId = d.previewId;
-        roomState.mockupId = d.mockupId;
+        if (d.mockupId) roomState.mockupId = d.mockupId;
         var img = document.getElementById('room-img');
-        img.onload = function() { setRoomBusy(false); img.style.display = 'block'; };
+        img.onload = function() { setRoomBusy(false); img.style.display = 'block'; document.getElementById('room-accept').disabled = false; };
         img.src = '/api/mockup-preview/' + d.previewId;
-        document.getElementById('room-status').textContent = d.mockupName;
+        document.getElementById('room-status').textContent = d.mockupName || '';
       } else {
         setRoomBusy(false);
         document.getElementById('room-status').textContent = 'Error: ' + await r.text();
-        document.getElementById('room-another').disabled = false;
       }
     } catch (e) {
       setRoomBusy(false);
       document.getElementById('room-status').textContent = 'Network error';
-      document.getElementById('room-another').disabled = false;
     }
   }
-  function tryAnotherRoom() { loadRoom(roomState.mockupId); }
+  function srcFolder() { runSource('/api/mockup', { webFileId: roomState.webId, excludeMockupId: roomState.mockupId }, 'Picking a room mockup…'); }
+  function srcGenerate() { runSource('/api/mockup-generate', { webFileId: roomState.webId }, 'Generating a room with Leonardo… (up to a minute)'); }
+  function srcScene() { runSource('/api/mockup-ai-scene', { webFileId: roomState.webId }, 'Leonardo is painting the scene… (up to a minute)'); }
   async function acceptRoom() {
     if (!roomState.previewId) return;
     var btn = document.getElementById('room-accept');
@@ -772,9 +862,13 @@ function layout(title, user, body, extraScript = '') {
         <img class="room-img" id="room-img" src="" alt="" style="display:none">
       </div>
       <div class="room-bar">
-        <span class="room-status" id="room-status"></span>
+        <div class="room-sources">
+          <button class="btn btn-gray" onclick="srcFolder()" style="width:auto;padding:8px 14px">🎲 Mockup folder</button>
+          <button class="btn btn-gray" onclick="srcGenerate()" style="width:auto;padding:8px 14px">✨ Generate room</button>
+          <button class="btn btn-gray" onclick="srcScene()" style="width:auto;padding:8px 14px">🖼 AI scene</button>
+        </div>
         <div class="room-btns">
-          <button class="btn btn-gray" id="room-another" onclick="tryAnotherRoom()" style="width:auto;padding:8px 16px" disabled>↺ Try another room</button>
+          <span class="room-status" id="room-status"></span>
           <button class="btn btn-green" id="room-accept" onclick="acceptRoom()" style="width:auto;padding:8px 20px" disabled>Accept &amp; Save</button>
         </div>
       </div>
@@ -1348,6 +1442,40 @@ app.post('/api/mockup-accept', requireAuth, async (req, res) => {
       });
     }
     res.json({ ok: true, fileName });
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
+// Leonardo faithful mode: generate an empty room, composite the poster into it
+app.post('/api/mockup-generate', requireAuth, async (req, res) => {
+  try {
+    if (!leonardoConfigured()) return res.status(503).send('Leonardo not configured — set LEONARDO_API_KEY');
+    const { webFileId } = req.body;
+    if (!webFileId) return res.status(400).send('Missing webFileId');
+    const drive = getDriveClient(req.user);
+    const posterBuf = await fetchDriveBuffer(drive, webFileId);
+    const roomBuf = await leoGenerateRoom();
+    let frame = await detectFrame(roomBuf);
+    if (!frame) { try { frame = await detectFrameWithClaude(roomBuf); } catch (e) {} }
+    if (!frame) return res.status(422).send('Generated room had no detectable frame — try again.');
+    const out = await composeMockup(roomBuf, posterBuf, frame);
+    res.json({ previewId: storeMockup(out) });
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
+// Leonardo guidance mode: Leonardo paints the poster into a scene
+app.post('/api/mockup-ai-scene', requireAuth, async (req, res) => {
+  try {
+    if (!leonardoConfigured()) return res.status(503).send('Leonardo not configured — set LEONARDO_API_KEY');
+    const { webFileId } = req.body;
+    if (!webFileId) return res.status(400).send('Missing webFileId');
+    const drive = getDriveClient(req.user);
+    const posterBuf = await fetchDriveBuffer(drive, webFileId);
+    const out = await leoGenerateScene(posterBuf);
+    res.json({ previewId: storeMockup(out) });
   } catch (err) {
     res.status(500).send(err.message);
   }
