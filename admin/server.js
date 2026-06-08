@@ -610,10 +610,31 @@ async function leoGenerateScene(posterBuffer) {
   return downloadToBuffer(url);
 }
 
-// Generate a room with a large empty bare wall (no frame) to mount a poster onto.
-async function leoGenerateBareRoom() {
+// Analyse the poster to pick a coherent wall colour + room vibe.
+async function analyzePosterForRoom(posterBuffer) {
+  const resized = await sharp(posterBuffer).resize(768, null, { fit: 'inside' }).jpeg({ quality: 85 }).toBuffer();
+  const msg = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 200,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: resized.toString('base64') } },
+        { type: 'text', text: 'Look at this poster artwork. Choose an interior room that would complement and harmonise with its colours and mood for a lifestyle product shot. Reply with ONLY compact JSON: {"wallColor":"<a specific wall paint colour that complements the poster, e.g. warm sage green>","vibe":"<3-6 word room mood/style, e.g. cozy minimalist scandinavian>"}' },
+      ],
+    }],
+  });
+  let txt = msg.content[0].text.trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  const o = JSON.parse(txt);
+  return { wallColor: o.wallColor || 'soft neutral', vibe: o.vibe || 'modern minimalist' };
+}
+
+// Generate a room with a large empty bare wall (no frame), colours coherent with the poster.
+async function leoGenerateBareRoom(palette = {}) {
+  const wall = palette.wallColor ? `a large clear empty ${palette.wallColor} wall` : 'a large clear empty blank wall';
+  const style = palette.vibe ? `, ${palette.vibe} interior` : '';
   const url = await leoGenerate({
-    prompt: 'A professional interior photograph of a stylish modern living room with a large clear empty blank wall at eye level. Tasteful furniture below and to the sides, the wall itself is completely bare — no pictures, no frames, no posters, no wall art. Soft natural daylight, photorealistic, high detail.',
+    prompt: `A professional interior photograph of a stylish living room${style} with ${wall} at eye level. Tasteful furniture below and to the sides. The wall itself is completely bare — no pictures, no frames, no posters, no wall art. Soft natural daylight, photorealistic, high detail.`,
     modelId: LEONARDO_MODEL,
     contrast: 3.5,
     styleUUID: '5bdc3f2a-1be6-4d1c-8e77-992a30824a2c', // Stock Photo — realistic interiors
@@ -622,44 +643,45 @@ async function leoGenerateBareRoom() {
   return downloadToBuffer(url);
 }
 
-// Ask Claude for the best clear wall area to hang a poster (fractions → pixels).
-async function detectWallArea(roomBuffer) {
-  const meta = await sharp(roomBuffer).metadata();
+// Ask Claude where to realistically hang the poster: center X, top edge, and width
+// (as image fractions), sized from furniture scale and positioned high, above furniture.
+async function detectPosterPlacement(roomBuffer) {
   const resized = await sharp(roomBuffer).resize(1024, null, { fit: 'inside' }).jpeg({ quality: 85 }).toBuffer();
   const msg = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
-    max_tokens: 300,
+    max_tokens: 200,
     messages: [{
       role: 'user',
       content: [
         { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: resized.toString('base64') } },
-        { type: 'text', text: 'This is a photo of a room with a large empty wall. Give the bounding box of the best clear, empty wall area to hang a single poster at roughly eye level — centered on open wall, not overlapping furniture, windows, lamps, or the ceiling/floor edges. Express as fractions of the image dimensions, each 0 to 1. Reply with ONLY compact JSON: {"x":<left>,"y":<top>,"w":<width>,"h":<height>}' },
+        { type: 'text', text: 'Decide where to realistically hang ONE poster on the wall in this room. Estimate the wall height and room depth from the furniture and camera distance, and choose a realistic physical poster size (a typical wall poster is ~50–80cm wide). The poster must sit at eye level in the UPPER portion of the clear wall, clearly ABOVE any sofa, bed, console or other furniture, with comfortable space above the furniture, and must not touch the ceiling. Reply with ONLY compact JSON using fractions of the image dimensions: {"centerX":<0-1 horizontal centre>,"topY":<0-1 top edge of the poster>,"width":<0-1 poster width as fraction of image width>}' },
       ],
     }],
   });
   let txt = msg.content[0].text.trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
-  const b = JSON.parse(txt);
-  if (typeof b.x !== 'number' || !(b.w > 0) || !(b.h > 0)) return null;
-  return { x: Math.round(b.x * meta.width), y: Math.round(b.y * meta.height), w: Math.round(b.w * meta.width), h: Math.round(b.h * meta.height) };
+  const o = JSON.parse(txt);
+  if (typeof o.centerX !== 'number' || !(o.width > 0)) return null;
+  return { centerX: o.centerX, topY: typeof o.topY === 'number' ? o.topY : 0.14, width: o.width };
 }
 
 // Composite the poster onto the wall as a 3D-looking mounted print with a drop shadow.
 async function composeOnWall(roomBuffer, posterBuffer) {
   const meta = await sharp(roomBuffer).metadata();
-  let area = null;
-  try { area = await detectWallArea(roomBuffer); } catch (e) {}
-  if (!area) {
-    area = { x: Math.round(meta.width * 0.34), y: Math.round(meta.height * 0.16), w: Math.round(meta.width * 0.32), h: Math.round(meta.height * 0.5) };
-  }
-  area = clampFrame(area, meta.width, meta.height);
+  let place = null;
+  try { place = await detectPosterPlacement(roomBuffer); } catch (e) {}
+  if (!place) place = { centerX: 0.5, topY: 0.13, width: 0.28 };
 
   const pMeta = await sharp(posterBuffer).metadata();
-  const maxW = Math.round(area.w * 0.85), maxH = Math.round(area.h * 0.85);
-  const scale = Math.min(maxW / pMeta.width, maxH / pMeta.height);
-  const pw = Math.max(40, Math.round(pMeta.width * scale));
-  const ph = Math.max(40, Math.round(pMeta.height * scale));
-  const px = Math.round(area.x + (area.w - pw) / 2);
-  const py = Math.round(area.y + (area.h - ph) / 2);
+  const widthFrac = Math.min(Math.max(place.width, 0.08), 0.55);
+  let pw = Math.max(40, Math.round(meta.width * widthFrac));
+  let ph = Math.max(40, Math.round(pw * (pMeta.height / pMeta.width)));
+  // Don't let it run off the wall vertically
+  if (ph > meta.height * 0.7) { ph = Math.round(meta.height * 0.7); pw = Math.round(ph * (pMeta.width / pMeta.height)); }
+
+  let px = Math.round(meta.width * place.centerX - pw / 2);
+  let py = Math.round(meta.height * place.topY);
+  px = Math.max(6, Math.min(px, meta.width - pw - 6));
+  py = Math.max(6, Math.min(py, meta.height - ph - 6));
 
   // Poster with a thin dark edge so it reads as a physical object against the wall
   const poster = await sharp(posterBuffer)
@@ -1539,7 +1561,9 @@ app.post('/api/mockup-generate', requireAuth, async (req, res) => {
     if (!webFileId) return res.status(400).send('Missing webFileId');
     const drive = getDriveClient(req.user);
     const posterBuf = await fetchDriveBuffer(drive, webFileId);
-    const roomBuf = await leoGenerateBareRoom();
+    let palette = {};
+    try { palette = await analyzePosterForRoom(posterBuf); } catch (e) {}
+    const roomBuf = await leoGenerateBareRoom(palette);
     const out = await composeOnWall(roomBuf, posterBuf);
     res.json({ previewId: storeMockup(out) });
   } catch (err) {
