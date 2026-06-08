@@ -610,6 +610,84 @@ async function leoGenerateScene(posterBuffer) {
   return downloadToBuffer(url);
 }
 
+// Generate a room with a large empty bare wall (no frame) to mount a poster onto.
+async function leoGenerateBareRoom() {
+  const url = await leoGenerate({
+    prompt: 'A professional interior photograph of a stylish modern living room with a large clear empty blank wall at eye level. Tasteful furniture below and to the sides, the wall itself is completely bare — no pictures, no frames, no posters, no wall art. Soft natural daylight, photorealistic, high detail.',
+    modelId: LEONARDO_MODEL,
+    contrast: 3.5,
+    styleUUID: '5bdc3f2a-1be6-4d1c-8e77-992a30824a2c', // Stock Photo — realistic interiors
+    width: 1024, height: 768, num_images: 1,
+  });
+  return downloadToBuffer(url);
+}
+
+// Ask Claude for the best clear wall area to hang a poster (fractions → pixels).
+async function detectWallArea(roomBuffer) {
+  const meta = await sharp(roomBuffer).metadata();
+  const resized = await sharp(roomBuffer).resize(1024, null, { fit: 'inside' }).jpeg({ quality: 85 }).toBuffer();
+  const msg = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 300,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: resized.toString('base64') } },
+        { type: 'text', text: 'This is a photo of a room with a large empty wall. Give the bounding box of the best clear, empty wall area to hang a single poster at roughly eye level — centered on open wall, not overlapping furniture, windows, lamps, or the ceiling/floor edges. Express as fractions of the image dimensions, each 0 to 1. Reply with ONLY compact JSON: {"x":<left>,"y":<top>,"w":<width>,"h":<height>}' },
+      ],
+    }],
+  });
+  let txt = msg.content[0].text.trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  const b = JSON.parse(txt);
+  if (typeof b.x !== 'number' || !(b.w > 0) || !(b.h > 0)) return null;
+  return { x: Math.round(b.x * meta.width), y: Math.round(b.y * meta.height), w: Math.round(b.w * meta.width), h: Math.round(b.h * meta.height) };
+}
+
+// Composite the poster onto the wall as a 3D-looking mounted print with a drop shadow.
+async function composeOnWall(roomBuffer, posterBuffer) {
+  const meta = await sharp(roomBuffer).metadata();
+  let area = null;
+  try { area = await detectWallArea(roomBuffer); } catch (e) {}
+  if (!area) {
+    area = { x: Math.round(meta.width * 0.34), y: Math.round(meta.height * 0.16), w: Math.round(meta.width * 0.32), h: Math.round(meta.height * 0.5) };
+  }
+  area = clampFrame(area, meta.width, meta.height);
+
+  const pMeta = await sharp(posterBuffer).metadata();
+  const maxW = Math.round(area.w * 0.85), maxH = Math.round(area.h * 0.85);
+  const scale = Math.min(maxW / pMeta.width, maxH / pMeta.height);
+  const pw = Math.max(40, Math.round(pMeta.width * scale));
+  const ph = Math.max(40, Math.round(pMeta.height * scale));
+  const px = Math.round(area.x + (area.w - pw) / 2);
+  const py = Math.round(area.y + (area.h - ph) / 2);
+
+  // Poster with a thin dark edge so it reads as a physical object against the wall
+  const poster = await sharp(posterBuffer)
+    .resize(pw, ph, { fit: 'fill' })
+    .extend({ top: 3, bottom: 3, left: 3, right: 3, background: { r: 22, g: 20, b: 18 } })
+    .toBuffer();
+
+  // Drop shadow — a dark rect at an offset, blurred across a full-size transparent layer
+  const blur = Math.max(8, Math.round(Math.max(pw, ph) * 0.025));
+  const offX = Math.round(blur * 0.5);
+  const offY = Math.round(blur * 0.9);
+  const darkRect = await sharp({ create: { width: pw, height: ph, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0.5 } } }).png().toBuffer();
+  const shadowLeft = Math.max(0, Math.min(px + offX, meta.width - pw));
+  const shadowTop = Math.max(0, Math.min(py + offY, meta.height - ph));
+  const shadow = await sharp({ create: { width: meta.width, height: meta.height, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } })
+    .composite([{ input: darkRect, left: shadowLeft, top: shadowTop }])
+    .blur(blur)
+    .png().toBuffer();
+
+  return sharp(roomBuffer)
+    .composite([
+      { input: shadow, left: 0, top: 0 },
+      { input: poster, left: Math.max(0, px - 3), top: Math.max(0, py - 3) },
+    ])
+    .png()
+    .toBuffer();
+}
+
 function esc(str) {
   return String(str)
     .replace(/&/g, '&amp;')
@@ -1452,7 +1530,8 @@ app.post('/api/mockup-accept', requireAuth, async (req, res) => {
   }
 });
 
-// Leonardo faithful mode: generate an empty room, composite the poster into it
+// Leonardo faithful mode: generate a bare-wall room, mount the poster on the
+// wall as a 3D-looking print with a drop shadow (no frame-fitting needed).
 app.post('/api/mockup-generate', requireAuth, async (req, res) => {
   try {
     if (!leonardoConfigured()) return res.status(503).send('Leonardo not configured — set LEONARDO_API_KEY');
@@ -1460,11 +1539,8 @@ app.post('/api/mockup-generate', requireAuth, async (req, res) => {
     if (!webFileId) return res.status(400).send('Missing webFileId');
     const drive = getDriveClient(req.user);
     const posterBuf = await fetchDriveBuffer(drive, webFileId);
-    const roomBuf = await leoGenerateRoom();
-    let frame = await detectFrame(roomBuf);
-    if (!frame) { try { frame = await detectFrameWithClaude(roomBuf); } catch (e) {} }
-    if (!frame) return res.status(422).send('Generated room had no detectable frame — try again.');
-    const out = await composeMockup(roomBuf, posterBuf, frame);
+    const roomBuf = await leoGenerateBareRoom();
+    const out = await composeOnWall(roomBuf, posterBuf);
     res.json({ previewId: storeMockup(out) });
   } catch (err) {
     res.status(500).send(err.message);
