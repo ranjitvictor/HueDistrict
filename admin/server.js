@@ -1742,6 +1742,30 @@ app.get('/api/sa-health', requireAuth, async (req, res) => {
   res.json(out);
 });
 
+// Per-admin self-check: confirms login, Drive read AND write for the logged-in user.
+app.get('/api/self-check', requireAuth, async (req, res) => {
+  const out = { email: req.user.email, hasRefreshToken: !!req.user.refreshToken };
+  try {
+    const drive = getDriveClient(req.user);
+    try {
+      const f = await drive.files.get({ fileId: ROOT_FOLDER_ID, fields: 'id,name,capabilities(canEdit,canAddChildren)', supportsAllDrives: true });
+      out.driveRead = true;
+      out.folderName = f.data.name;
+      out.capabilities = f.data.capabilities || null;
+    } catch (e) { out.driveRead = false; out.readError = e.message; }
+    try {
+      const created = await drive.files.create({
+        requestBody: { name: '_hd_selfcheck_' + Date.now() + '.txt', parents: [ROOT_FOLDER_ID], mimeType: 'text/plain' },
+        media: { mimeType: 'text/plain', body: 'ok' },
+        supportsAllDrives: true, fields: 'id',
+      });
+      out.driveWrite = true;
+      try { await drive.files.delete({ fileId: created.data.id, supportsAllDrives: true }); } catch {}
+    } catch (e) { out.driveWrite = false; out.writeError = e.message; }
+  } catch (e) { out.error = e.message; }
+  res.json(out);
+});
+
 app.options('/api/public-config', (req, res) => { setCors(res); res.sendStatus(200); });
 app.get('/api/public-config', async (req, res) => {
   setCors(res);
