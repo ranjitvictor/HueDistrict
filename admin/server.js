@@ -111,6 +111,33 @@ function setCors(res) {
   res.set('Access-Control-Allow-Headers', 'Content-Type');
 }
 
+// ── Razorpay ──────────────────────────────────────────────
+function razorpayConfigured() {
+  return !!(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
+}
+
+async function createRazorpayOrder(amountPaise, receipt) {
+  const auth = Buffer.from(`${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`).toString('base64');
+  const r = await fetch('https://api.razorpay.com/v1/orders', {
+    method: 'POST',
+    headers: { 'Authorization': 'Basic ' + auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount: amountPaise, currency: 'INR', receipt: String(receipt).slice(0, 40) }),
+  });
+  const j = await r.json();
+  if (!r.ok) throw new Error((j.error && j.error.description) || 'Razorpay order creation failed');
+  return j;
+}
+
+function verifyRazorpaySignature(orderId, paymentId, signature) {
+  const expected = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+    .update(orderId + '|' + paymentId)
+    .digest('hex');
+  // constant-time compare
+  const a = Buffer.from(expected);
+  const b = Buffer.from(String(signature || ''));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 function statusBadge(status) {
   const map = { pending: ['#fef3c7','#92400e','Pending Payment'], paid: ['#d1fae5','#065f46','Paid'], dispatched: ['#dbeafe','#1e40af','Dispatched'], cancelled: ['#fee2e2','#991b1b','Cancelled'] };
   const [bg, color, label] = map[status] || ['#f3f4f6','#374151', status];
@@ -1700,9 +1727,10 @@ app.get('/api/public-config', async (req, res) => {
       upiId: config.upiId || process.env.UPI_ID || '',
       upiName: config.upiName || 'Hue District',
       qrUrl: config.qrFileId ? `${base}/api/public-img/${config.qrFileId}` : null,
+      razorpay: razorpayConfigured(),
     });
   } catch (e) {
-    res.json({ upiId: process.env.UPI_ID || '', upiName: 'Hue District' });
+    res.json({ upiId: process.env.UPI_ID || '', upiName: 'Hue District', razorpay: razorpayConfigured() });
   }
 });
 
@@ -1792,6 +1820,70 @@ app.post('/api/orders', async (req, res) => {
     const folderId = await getOrCreateSubfolder(drive, ROOT_FOLDER_ID, ORDERS_FOLDER_NAME);
     await writeDriveJson(drive, folderId, `${order.id}.json`, { ...order, status: 'pending', paidAt: null, dispatchedAt: null });
     res.json({ ok: true, orderId: order.id });
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
+});
+
+// Razorpay: create an order (also persists our pending order record)
+app.options('/api/razorpay/order', (req, res) => { setCors(res); res.sendStatus(200); });
+app.post('/api/razorpay/order', async (req, res) => {
+  setCors(res);
+  try {
+    if (!razorpayConfigured()) return res.status(503).send('Razorpay not configured');
+    const order = req.body.order;
+    if (!order || !order.id || !order.customer || !Array.isArray(order.items) || !(order.total > 0)) {
+      return res.status(400).send('Invalid order');
+    }
+    const drive = getServiceDriveClient();
+    if (!drive) return res.status(503).send('Order service not configured — set GOOGLE_SERVICE_ACCOUNT_KEY');
+
+    const rzpOrder = await createRazorpayOrder(Math.round(order.total * 100), order.id);
+
+    const folderId = await getOrCreateSubfolder(drive, ROOT_FOLDER_ID, ORDERS_FOLDER_NAME);
+    await writeDriveJson(drive, folderId, `${order.id}.json`, {
+      ...order, status: 'pending', method: 'razorpay',
+      razorpayOrderId: rzpOrder.id, paidAt: null, dispatchedAt: null,
+    });
+
+    res.json({
+      keyId: process.env.RAZORPAY_KEY_ID,
+      razorpayOrderId: rzpOrder.id,
+      amount: rzpOrder.amount,
+      currency: rzpOrder.currency,
+      orderId: order.id,
+    });
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
+});
+
+// Razorpay: verify payment signature and mark the order paid
+app.options('/api/razorpay/verify', (req, res) => { setCors(res); res.sendStatus(200); });
+app.post('/api/razorpay/verify', async (req, res) => {
+  setCors(res);
+  try {
+    const { orderId, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+    if (!orderId || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).send('Missing fields');
+    }
+    if (!verifyRazorpaySignature(razorpay_order_id, razorpay_payment_id, razorpay_signature)) {
+      return res.status(400).send('Signature verification failed');
+    }
+    const drive = getServiceDriveClient();
+    if (!drive) return res.status(503).send('Order service not configured');
+    const folderId = await getOrCreateSubfolder(drive, ROOT_FOLDER_ID, ORDERS_FOLDER_NAME);
+    const order = await readDriveJson(drive, folderId, `${orderId}.json`);
+    if (!order) return res.status(404).send('Order not found');
+    // Guard: the returned order id must match the one we stored
+    if (order.razorpayOrderId && order.razorpayOrderId !== razorpay_order_id) {
+      return res.status(400).send('Order mismatch');
+    }
+    await writeDriveJson(drive, folderId, `${orderId}.json`, {
+      ...order, status: 'paid', paidAt: new Date().toISOString(),
+      razorpayPaymentId: razorpay_payment_id,
+    });
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).send(e.message);
   }

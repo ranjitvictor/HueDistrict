@@ -146,41 +146,52 @@
 
         <!-- Payment -->
         <div class="card">
-          <div class="card-title">Pay via UPI</div>
+          <div class="card-title">Payment</div>
 
           <div class="amount-reminder">
             <span class="amount-reminder-text">Amount to pay</span>
             <span class="amount-reminder-val" id="pay-amount">₹0</span>
           </div>
 
-          <div class="pay-tabs">
-            <button class="pay-tab active" onclick="switchTab(this,'qr')">📷 Scan QR</button>
-            <button class="pay-tab" onclick="switchTab(this,'id')">📋 UPI ID</button>
-          </div>
-
-          <div class="pay-panel active" id="panel-qr">
-            <div class="qr-box">
-              <canvas id="qr-canvas"></canvas>
-              <img id="qr-image" alt="Payment QR" style="display:none;width:220px;height:220px;object-fit:contain;border-radius:6px">
-              <div class="qr-hint">Scan with Google Pay, PhonePe, Paytm, BHIM or any UPI app</div>
+          <!-- Razorpay (primary, shown when enabled) -->
+          <div id="rzp-section" style="display:none">
+            <button class="submit-btn" id="rzp-btn" onclick="payWithRazorpay()">Pay securely</button>
+            <div style="text-align:center;margin-top:14px">
+              <a href="#" onclick="toggleManual(event)" style="font-size:13px;color:rgba(21,17,13,0.5)">Or pay manually via UPI</a>
             </div>
           </div>
 
-          <div class="pay-panel" id="panel-id">
-            <div class="upi-id-row">
-              <span class="upi-id-val" id="upi-id-display">Loading…</span>
-              <button class="copy-btn" onclick="copyId()">Copy</button>
+          <!-- Manual UPI (fallback, or primary when Razorpay is off) -->
+          <div id="manual-section">
+            <div class="pay-tabs">
+              <button class="pay-tab active" onclick="switchTab(this,'qr')">📷 Scan QR</button>
+              <button class="pay-tab" onclick="switchTab(this,'id')">📋 UPI ID</button>
             </div>
-            <div class="qr-hint" style="font-size:12px;color:rgba(21,17,13,0.45)">Open any UPI app → Pay to UPI ID → paste the above</div>
-          </div>
 
-          <div class="payer-section">
-            <div class="payer-hint">Your UPI ID (optional — helps us match and verify your payment faster)</div>
-            <div class="field" style="margin:0"><input id="f-upi" type="text" placeholder="yourname@bank"></div>
+            <div class="pay-panel active" id="panel-qr">
+              <div class="qr-box">
+                <canvas id="qr-canvas"></canvas>
+                <img id="qr-image" alt="Payment QR" style="display:none;width:220px;height:220px;object-fit:contain;border-radius:6px">
+                <div class="qr-hint">Scan with Google Pay, PhonePe, Paytm, BHIM or any UPI app</div>
+              </div>
+            </div>
+
+            <div class="pay-panel" id="panel-id">
+              <div class="upi-id-row">
+                <span class="upi-id-val" id="upi-id-display">Loading…</span>
+                <button class="copy-btn" onclick="copyId()">Copy</button>
+              </div>
+              <div class="qr-hint" style="font-size:12px;color:rgba(21,17,13,0.45)">Open any UPI app → Pay to UPI ID → paste the above</div>
+            </div>
+
+            <div class="payer-section">
+              <div class="payer-hint">Your UPI ID (optional — helps us match and verify your payment faster)</div>
+              <div class="field" style="margin:0"><input id="f-upi" type="text" placeholder="yourname@bank"></div>
+            </div>
+
+            <button class="submit-btn" id="submit-btn" onclick="placeOrder()" style="margin-top:18px">I've Paid — Place Order</button>
           </div>
         </div>
-
-        <button class="submit-btn" id="submit-btn" onclick="placeOrder()">I've Paid — Place Order</button>
       </div>
     </div>
   </div>
@@ -196,6 +207,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
   <script>
     const ADMIN = 'https://admin.huedistrict.com';
     let cart = [];
@@ -203,6 +215,7 @@
     let storeUpiId = '';
     let storeUpiName = 'Hue District';
     let storeQrUrl = '';
+    let razorpayEnabled = false;
     const orderId = genId();
 
     function genId() {
@@ -271,9 +284,21 @@
     async function fetchConfig() {
       try {
         var r = await fetch(ADMIN + '/api/public-config');
-        if (r.ok) { var c = await r.json(); storeUpiId = c.upiId || ''; storeUpiName = c.upiName || 'Hue District'; storeQrUrl = c.qrUrl || ''; }
+        if (r.ok) { var c = await r.json(); storeUpiId = c.upiId || ''; storeUpiName = c.upiName || 'Hue District'; storeQrUrl = c.qrUrl || ''; razorpayEnabled = !!c.razorpay; }
       } catch(e) {}
+      // When Razorpay is on, make it the primary method and hide the manual UPI until requested
+      if (razorpayEnabled) {
+        document.getElementById('rzp-section').style.display = 'block';
+        document.getElementById('manual-section').style.display = 'none';
+        document.getElementById('rzp-btn').textContent = 'Pay ₹' + total + ' securely';
+      }
       renderPayment();
+    }
+
+    function toggleManual(e) {
+      if (e) e.preventDefault();
+      var m = document.getElementById('manual-section');
+      m.style.display = m.style.display === 'none' ? 'block' : 'none';
     }
 
     function switchTab(btn, panel) {
@@ -306,31 +331,83 @@
       return ok;
     }
 
+    function buildCustomer() {
+      return {
+        name: document.getElementById('f-name').value.trim(),
+        phone: document.getElementById('f-phone').value.trim(),
+        address: document.getElementById('f-address').value.trim(),
+        city: document.getElementById('f-city').value.trim(),
+        pincode: document.getElementById('f-pincode').value.trim(),
+      };
+    }
+
+    function showConfirmation(msg) {
+      sessionStorage.removeItem('hd_cart');
+      document.getElementById('checkout-wrap').style.display = 'none';
+      document.getElementById('confirmation').style.display = 'block';
+      document.getElementById('conf-id').textContent = orderId;
+      if (msg) document.querySelector('.conf-sub').textContent = msg;
+    }
+
+    // Razorpay — primary, auto-confirmed flow
+    async function payWithRazorpay() {
+      if (!validate()) return;
+      if (!cart.length || total === 0) { alert('Your cart is empty.'); return; }
+      var btn = document.getElementById('rzp-btn');
+      btn.disabled = true; btn.textContent = 'Starting…';
+      var payload = { id: orderId, customer: buildCustomer(), items: cart, total: total, createdAt: new Date().toISOString() };
+      try {
+        var r = await fetch(ADMIN + '/api/razorpay/order', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ order: payload }) });
+        if (!r.ok) throw new Error(await r.text());
+        var d = await r.json();
+        var options = {
+          key: d.keyId,
+          amount: d.amount,
+          currency: d.currency,
+          order_id: d.razorpayOrderId,
+          name: 'HueDistrict',
+          description: 'Poster order ' + orderId,
+          image: '/ig-pfp-1080.png',
+          prefill: { name: payload.customer.name, contact: payload.customer.phone },
+          notes: { orderId: orderId },
+          theme: { color: '#FF2D6F' },
+          handler: async function(resp) {
+            try {
+              var v = await fetch(ADMIN + '/api/razorpay/verify', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({ orderId: orderId, razorpay_order_id: resp.razorpay_order_id, razorpay_payment_id: resp.razorpay_payment_id, razorpay_signature: resp.razorpay_signature })
+              });
+              if (v.ok) { showConfirmation('Payment received — your order is confirmed. We\\'ll be in touch on WhatsApp with dispatch details.'); }
+              else { alert('Payment captured but verification failed. Please contact us with order ' + orderId); }
+            } catch(e) { alert('Verification error. Please contact us with order ' + orderId); }
+          },
+          modal: { ondismiss: function(){ btn.disabled = false; btn.textContent = 'Pay ₹' + total + ' securely'; } }
+        };
+        var rzp = new Razorpay(options);
+        rzp.on('payment.failed', function(){ btn.disabled = false; btn.textContent = 'Pay ₹' + total + ' securely'; });
+        rzp.open();
+        btn.disabled = false; btn.textContent = 'Pay ₹' + total + ' securely';
+      } catch(e) {
+        alert('Could not start payment: ' + e.message);
+        btn.disabled = false; btn.textContent = 'Pay ₹' + total + ' securely';
+      }
+    }
+
+    // Manual UPI fallback — creates a pending order to verify by hand
     async function placeOrder() {
       if (!validate()) return;
       if (!cart.length || total === 0) { alert('Your cart is empty.'); return; }
       var btn = document.getElementById('submit-btn');
       btn.disabled = true; btn.textContent = 'Placing order…';
       var payload = {
-        id: orderId,
-        customer: {
-          name: document.getElementById('f-name').value.trim(),
-          phone: document.getElementById('f-phone').value.trim(),
-          address: document.getElementById('f-address').value.trim(),
-          city: document.getElementById('f-city').value.trim(),
-          pincode: document.getElementById('f-pincode').value.trim(),
-        },
-        items: cart, total: total,
+        id: orderId, customer: buildCustomer(), items: cart, total: total,
         payerUpi: document.getElementById('f-upi').value.trim(),
         createdAt: new Date().toISOString()
       };
       try {
         var r = await fetch(ADMIN + '/api/orders', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
         if (r.ok) {
-          sessionStorage.removeItem('hd_cart');
-          document.getElementById('checkout-wrap').style.display = 'none';
-          document.getElementById('confirmation').style.display = 'block';
-          document.getElementById('conf-id').textContent = orderId;
+          showConfirmation();
         } else {
           alert('Something went wrong: ' + await r.text());
           btn.disabled = false; btn.textContent = "I've Paid — Place Order";
