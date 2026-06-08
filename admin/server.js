@@ -910,13 +910,22 @@ const roomScript = `
     document.querySelectorAll('.room-sources .btn').forEach(function(b){ b.disabled = busy; });
     document.getElementById('room-accept').disabled = busy || !roomState.previewId;
   }
-  function previewRoom(folderId, baseName, webId) {
+  function previewRoom(folderId, baseName, webId, savedRoomId) {
     roomState = { folderId: folderId, baseName: baseName, webId: webId, previewId: null, mockupId: null };
     document.getElementById('room-img').style.display = 'none';
     document.getElementById('room-status').textContent = '';
     document.getElementById('room-accept').disabled = true;
     document.getElementById('room-modal').classList.add('open');
-    srcFolder();
+    if (savedRoomId) {
+      // Show the already-saved room version; sources below can regenerate it
+      setRoomBusy(true, 'Loading saved version…');
+      var img = document.getElementById('room-img');
+      img.onload = function() { setRoomBusy(false); img.style.display = 'block'; document.getElementById('room-accept').disabled = true; };
+      img.src = '/api/preview/' + savedRoomId + '?t=' + Date.now();
+      document.getElementById('room-status').textContent = 'Current saved version — generate below to replace';
+    } else {
+      srcFolder();
+    }
   }
   async function runSource(endpoint, body, label) {
     document.getElementById('room-img').style.display = 'none';
@@ -1202,7 +1211,7 @@ app.get('/folder/:folderId', requireAuth, async (req, res) => {
                         : `<div class="badge-missing">Missing _ig or _web version</div>`}
                   </div>
                   ${p.web
-                    ? `<button class="btn btn-gray" onclick="previewRoom('${esc(folderId)}','${esc(p.name)}','${p.web.id}')">🖼 Preview in Room</button>`
+                    ? `<button class="btn btn-gray" onclick="previewRoom('${esc(folderId)}','${esc(p.name)}','${p.web.id}','${p.room?.id || ''}')">🖼 Preview in Room</button>`
                     : ''}
                   ${p.pdf
                     ? `<a href="/api/download/${esc(p.pdf.id)}" class="btn btn-gray">Download PDF</a>`
