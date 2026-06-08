@@ -867,7 +867,6 @@ function layout(title, user, body, extraScript = '') {
         <div class="room-sources">
           <button class="btn btn-gray" onclick="srcFolder()" style="width:auto;padding:8px 14px">🎲 Mockup folder</button>
           <button class="btn btn-gray" onclick="srcGenerate()" style="width:auto;padding:8px 14px">✨ Generate room</button>
-          <button class="btn btn-gray" onclick="srcScene()" style="width:auto;padding:8px 14px">🖼 AI scene</button>
         </div>
         <div class="room-btns">
           <span class="room-status" id="room-status"></span>
