@@ -594,11 +594,15 @@ async function leoUploadInitImage(buffer, ext = 'png') {
 async function leoGenerateScene(posterBuffer) {
   const initId = await leoUploadInitImage(posterBuffer, 'png');
   const url = await leoGenerate({
-    prompt: 'a framed art print of this image hanging on the wall of a stylish, well-lit modern living room, interior design photography, the framed artwork is the focal point on the wall, photorealistic',
+    prompt: 'a stylish, well-lit modern living room interior with a large framed art print as the focal point on the wall, interior design photography, photorealistic',
     modelId: LEONARDO_MODEL,
     width: 1024, height: 768, num_images: 1,
-    init_image_id: initId,
-    init_strength: 0.4,
+    controlnets: [{
+      initImageId: initId,
+      initImageType: 'UPLOADED',
+      preprocessorId: 67,        // Style Reference → StyleTransfer
+      strengthType: 'High',
+    }],
   });
   return downloadToBuffer(url);
 }
