@@ -105,6 +105,20 @@ function getServiceDriveClient() {
   } catch (e) { return null; }
 }
 
+// Service accounts have no storage quota, so they can't CREATE files in a
+// personal (non-Shared) Drive. For public writes (orders), act as an admin via a
+// stored refresh token (OAuth delegation) so files are owned by a real user.
+async function getDelegatedDriveClient() {
+  const sa = getServiceDriveClient();
+  if (!sa) return null;
+  let data;
+  try { data = await readDriveJson(sa, ROOT_FOLDER_ID, '_hd_oauth.json'); } catch (e) { return null; }
+  if (!data || !data.refreshToken) return null;
+  const auth = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
+  auth.setCredentials({ refresh_token: data.refreshToken });
+  return google.drive({ version: 'v3', auth });
+}
+
 function setCors(res) {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -1105,7 +1119,19 @@ app.get('/auth/google', passport.authenticate('google', {
 
 app.get('/auth/google/callback',
   passport.authenticate('google', { failureRedirect: '/login?error=access_denied' }),
-  (req, res) => res.redirect('/')
+  async (req, res) => {
+    // Persist this admin's refresh token so public order writes can act as a real
+    // user (service accounts can't create files in a personal Drive — no quota).
+    try {
+      if (req.user && req.user.refreshToken) {
+        const drive = getDriveClient(req.user);
+        await writeDriveJson(drive, ROOT_FOLDER_ID, '_hd_oauth.json', {
+          refreshToken: req.user.refreshToken, email: req.user.email, updatedAt: new Date().toISOString(),
+        });
+      }
+    } catch (e) { /* non-fatal */ }
+    res.redirect('/');
+  }
 );
 
 app.get('/logout', (req, res) => {
@@ -1815,8 +1841,8 @@ app.post('/api/orders', async (req, res) => {
   try {
     const order = req.body;
     if (!order.id || !order.customer || !Array.isArray(order.items)) return res.status(400).send('Invalid order');
-    const drive = getServiceDriveClient();
-    if (!drive) return res.status(503).send('Order service not configured — set GOOGLE_SERVICE_ACCOUNT_KEY');
+    const drive = await getDelegatedDriveClient();
+    if (!drive) return res.status(503).send('Order storage not ready — an admin must sign in to admin.huedistrict.com once.');
     const folderId = await getOrCreateSubfolder(drive, ROOT_FOLDER_ID, ORDERS_FOLDER_NAME);
     await writeDriveJson(drive, folderId, `${order.id}.json`, { ...order, status: 'pending', paidAt: null, dispatchedAt: null });
     res.json({ ok: true, orderId: order.id });
@@ -1835,8 +1861,8 @@ app.post('/api/razorpay/order', async (req, res) => {
     if (!order || !order.id || !order.customer || !Array.isArray(order.items) || !(order.total > 0)) {
       return res.status(400).send('Invalid order');
     }
-    const drive = getServiceDriveClient();
-    if (!drive) return res.status(503).send('Order service not configured — set GOOGLE_SERVICE_ACCOUNT_KEY');
+    const drive = await getDelegatedDriveClient();
+    if (!drive) return res.status(503).send('Order storage not ready — an admin must sign in to admin.huedistrict.com once.');
 
     const rzpOrder = await createRazorpayOrder(Math.round(order.total * 100), order.id);
 
@@ -1870,8 +1896,8 @@ app.post('/api/razorpay/verify', async (req, res) => {
     if (!verifyRazorpaySignature(razorpay_order_id, razorpay_payment_id, razorpay_signature)) {
       return res.status(400).send('Signature verification failed');
     }
-    const drive = getServiceDriveClient();
-    if (!drive) return res.status(503).send('Order service not configured');
+    const drive = await getDelegatedDriveClient();
+    if (!drive) return res.status(503).send('Order storage not ready — an admin must sign in once.');
     const folderId = await getOrCreateSubfolder(drive, ROOT_FOLDER_ID, ORDERS_FOLDER_NAME);
     const order = await readDriveJson(drive, folderId, `${orderId}.json`);
     if (!order) return res.status(404).send('Order not found');
